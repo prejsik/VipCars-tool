@@ -1,0 +1,23 @@
+{
+  "locations": [
+    "Warsaw",
+    "Krakow",
+    "Gdansk",
+    "Katowice",
+    "Wroclaw",
+    "Poznan"
+  ],
+  "pickupDate": "2026-05-15",
+  "pickupTime": "10:00",
+  "dropoffDate": "2026-05-17",
+  "dropoffTime": "10:00",
+  "pickupWeekdays": ["thursday", "friday"],
+  "durationsDays": [2, 3],
+  "residenceCountry": "Poland",
+  "driverAge": 30,
+  "headless": true,
+  "timeoutMs": 45000,
+  "locationConcurrency": 1,
+  "outputCsv": "output/vipcars-results.csv",
+  "artifactsDir": "artifacts/vipcars"
+}

@@ -1,0 +1,14 @@
+{
+  "name": "vipcars-tool",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "vipcars": "node src/vipcars/cli.js --config vipcars.config.example.json",
+    "vipcars:report": "node src/vipcars/reportHtml.js output/vipcars-results.csv output/vipcars-report.html",
+    "test": "node tests/run-vipcars-tests.js"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  }
+}

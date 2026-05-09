@@ -1,0 +1,214 @@
+name: VipCars daily run
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/vipcars-daily.yml"
+      - "src/vipcars/**"
+      - "tests/**"
+      - "vipcars.config.example.json"
+      - "package.json"
+      - "package-lock.json"
+  schedule:
+    - cron: "30 4 * * *"
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+    inputs:
+      locations:
+        description: "Comma-separated VipCars locations"
+        required: true
+        default: "Warsaw,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
+      pickup_weekdays:
+        description: "Comma-separated pickup weekdays"
+        required: true
+        default: "thursday,friday"
+      durations:
+        description: "Comma-separated rental durations in days"
+        required: true
+        default: "2,3"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  SCHEDULE_LOCATIONS: "Warsaw,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
+  SCHEDULE_PICKUP_WEEKDAYS: "thursday,friday"
+  SCHEDULE_DURATIONS: "2,3"
+  PUSH_TEST_LOCATIONS: "Warsaw"
+  PUSH_TEST_PICKUP_WEEKDAYS: "friday"
+  PUSH_TEST_DURATIONS: "2"
+
+jobs:
+  vipcars:
+    name: Run VipCars scraper
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment:
+      name: github-pages
+      url: ${{ steps.pages-deployment.outputs.page_url }}
+
+    steps:
+      - name: Check Warsaw schedule gate
+        id: gate
+        shell: bash
+        run: |
+          warsaw_hour="$(TZ=Europe/Warsaw date +%H)"
+          warsaw_now="$(TZ=Europe/Warsaw date '+%Y-%m-%d %H:%M:%S %Z')"
+          echo "Warsaw time now: $warsaw_now"
+
+          if [[ "${{ github.event_name }}" != "schedule" ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$warsaw_hour" == "06" ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout repository
+        if: steps.gate.outputs.should_run == 'true'
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        if: steps.gate.outputs.should_run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Node dependencies
+        if: steps.gate.outputs.should_run == 'true'
+        run: npm install
+
+      - name: Install Playwright Chromium
+        if: steps.gate.outputs.should_run == 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Run tests
+        if: steps.gate.outputs.should_run == 'true'
+        run: npm test
+
+      - name: Resolve run options
+        if: steps.gate.outputs.should_run == 'true'
+        id: options
+        shell: bash
+        env:
+          INPUT_LOCATIONS: ${{ inputs.locations }}
+          INPUT_PICKUP_WEEKDAYS: ${{ inputs.pickup_weekdays }}
+          INPUT_DURATIONS: ${{ inputs.durations }}
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            default_locations="$PUSH_TEST_LOCATIONS"
+            default_pickup_weekdays="$PUSH_TEST_PICKUP_WEEKDAYS"
+            default_durations="$PUSH_TEST_DURATIONS"
+          else
+            default_locations="$SCHEDULE_LOCATIONS"
+            default_pickup_weekdays="$SCHEDULE_PICKUP_WEEKDAYS"
+            default_durations="$SCHEDULE_DURATIONS"
+          fi
+
+          echo "locations=${INPUT_LOCATIONS:-$default_locations}" >> "$GITHUB_OUTPUT"
+          echo "pickup_weekdays=${INPUT_PICKUP_WEEKDAYS:-$default_pickup_weekdays}" >> "$GITHUB_OUTPUT"
+          echo "durations=${INPUT_DURATIONS:-$default_durations}" >> "$GITHUB_OUTPUT"
+
+      - name: Run VipCars scraper
+        if: steps.gate.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          mkdir -p output
+          set -o pipefail
+
+          node src/vipcars/cli.js \
+            --config vipcars.config.example.json \
+            --locations="${{ steps.options.outputs.locations }}" \
+            --pickup-weekdays="${{ steps.options.outputs.pickup_weekdays }}" \
+            --durations-days="${{ steps.options.outputs.durations }}" \
+            --timeout-ms=45000 \
+            --output-csv output/vipcars-results.csv \
+            2> >(tee output/vipcars-run-error.txt >&2) \
+            | tee output/vipcars-run-log.txt
+
+      - name: Generate VipCars HTML report
+        if: steps.gate.outputs.should_run == 'true' && always()
+        shell: bash
+        run: |
+          if [[ -f output/vipcars-results.csv ]]; then
+            node src/vipcars/reportHtml.js output/vipcars-results.csv output/vipcars-report.html
+          else
+            echo "::warning::VipCars CSV output is missing; report generation skipped."
+          fi
+
+      - name: Prepare GitHub Pages site
+        if: steps.gate.outputs.should_run == 'true' && hashFiles('output/vipcars-report.html') != ''
+        run: |
+          mkdir -p public
+          cp output/vipcars-report.html public/index.html
+          cp output/vipcars-report.html public/report.html
+          cp output/vipcars-results.csv public/vipcars-results.csv
+          cp output/vipcars-run-log.txt public/vipcars-run-log.txt || true
+          cp output/vipcars-run-error.txt public/vipcars-run-error.txt || true
+
+      - name: Configure GitHub Pages
+        if: steps.gate.outputs.should_run == 'true' && hashFiles('public/report.html') != ''
+        uses: actions/configure-pages@v5
+
+      - name: Upload GitHub Pages artifact
+        if: steps.gate.outputs.should_run == 'true' && hashFiles('public/report.html') != ''
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy GitHub Pages
+        id: pages-deployment
+        if: steps.gate.outputs.should_run == 'true' && hashFiles('public/report.html') != ''
+        uses: actions/deploy-pages@v4
+
+      - name: Upload VipCars results
+        id: upload
+        if: steps.gate.outputs.should_run == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vipcars-results-${{ github.run_number }}
+          path: |
+            output/vipcars-results.csv
+            output/vipcars-report.html
+            output/vipcars-run-log.txt
+            output/vipcars-run-error.txt
+            artifacts/vipcars/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Notify Telegram
+        if: steps.gate.outputs.should_run == 'true' && steps.upload.outputs['artifact-url'] != ''
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PAGE_URL: ${{ steps.pages-deployment.outputs.page_url }}
+          ARTIFACT_URL: ${{ steps.upload.outputs['artifact-url'] }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
+            echo "::warning::Telegram secrets are missing; notification skipped."
+            exit 0
+          fi
+
+          if [[ -n "$PAGE_URL" ]]; then
+            message=$(printf 'VipCars: wyniki sa gotowe.\n\nRaport HTML:\n%sreport.html\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$PAGE_URL" "$ARTIFACT_URL" "$RUN_URL")
+          else
+            message=$(printf 'VipCars: wyniki sa gotowe.\n\nArtifact:\n%s\n\nGitHub Actions run:\n%s\n' "$ARTIFACT_URL" "$RUN_URL")
+          fi
+
+          if ! curl --fail --show-error --silent \
+            --request POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${message}" \
+            --data-urlencode "disable_web_page_preview=true"; then
+            echo "::warning::Telegram notification failed; scraper results were still uploaded."
+          fi
