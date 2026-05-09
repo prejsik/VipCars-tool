@@ -171,7 +171,7 @@ function loadConfig(argv) {
   ];
 
   return {
-    baseUrl: normalizeWhitespace(merged.baseUrl || "https://www.vipcars.com"),
+    baseUrl: normalizeWhitespace(merged.baseUrl || "https://www.vipcars.com/pl"),
     locations,
     pickupDate,
     pickupDateOptions: pickupWeekdays.length

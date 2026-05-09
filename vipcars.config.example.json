@@ -13,6 +13,7 @@
   "dropoffTime": "10:00",
   "pickupWeekdays": ["thursday", "friday"],
   "durationsDays": [2, 3],
+  "baseUrl": "https://www.vipcars.com/pl",
   "residenceCountry": "Poland",
   "driverAge": 30,
   "headless": true,

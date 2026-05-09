@@ -25,7 +25,7 @@ runTest("loadConfig accepts CLI locations and dates", () => {
     "--dropoff-time", "10:00"
   ]);
   assert.deepEqual(config.locations, ["Warsaw"]);
-  assert.equal(config.baseUrl, "https://www.vipcars.com");
+  assert.equal(config.baseUrl, "https://www.vipcars.com/pl");
 });
 
 runTest("parseMoney handles VipCars price labels", () => {
@@ -56,6 +56,56 @@ runTest("CSV and HTML report render top offers", () => {
   assert.match(html, /VipCars report/);
   assert.match(html, /Thrifty/);
   assert.match(html, /52\.26 PLN/);
+});
+
+runTest("HTML report applies all MM highlight colors", () => {
+  const html = buildHtmlReport([
+    {
+      location: "Warsaw",
+      duration_days: "2",
+      pickup_date: "2026-05-15",
+      dropoff_date: "2026-05-17",
+      provider: "MM Cars Rental",
+      provider_rating: "",
+      total_price: "100",
+      currency: "PLN"
+    },
+    {
+      location: "Warsaw",
+      duration_days: "2",
+      pickup_date: "2026-05-15",
+      dropoff_date: "2026-05-17",
+      provider: "Alamo",
+      provider_rating: "",
+      total_price: "120",
+      currency: "PLN"
+    },
+    {
+      location: "Krakow",
+      duration_days: "2",
+      pickup_date: "2026-05-15",
+      dropoff_date: "2026-05-17",
+      provider: "Alamo",
+      provider_rating: "",
+      total_price: "100",
+      currency: "PLN"
+    },
+    {
+      location: "Krakow",
+      duration_days: "2",
+      pickup_date: "2026-05-15",
+      dropoff_date: "2026-05-17",
+      provider: "MM Cars Rental",
+      provider_rating: "",
+      total_price: "108",
+      currency: "PLN"
+    }
+  ], "2026-05-15T00:00:00.000Z");
+
+  assert.match(html, /mm mm-top1-gap/);
+  assert.match(html, /mm mm-close/);
+  assert.match(html, /badge close/);
+  assert.match(html, /badge good/);
 });
 
 if (!process.exitCode) {

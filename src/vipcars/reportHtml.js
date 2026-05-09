@@ -100,8 +100,56 @@ function isMmCarsProvider(value) {
   return String(value || "").trim().toLowerCase().includes("mm cars rental");
 }
 
-function offerClass(offer) {
-  return isMmCarsProvider(offer?.provider) ? " class=\"mm\"" : "";
+function isPlnOffer(offer) {
+  return String(offer?.currency || "").toUpperCase() === "PLN";
+}
+
+function isSameCurrency(left, right) {
+  return String(left?.currency || "").toUpperCase() === String(right?.currency || "").toUpperCase();
+}
+
+function rentalDaysForComparison(mmOffer, competitorOffer) {
+  const candidates = [mmOffer?.duration_days, competitorOffer?.duration_days]
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return candidates[0] || 1;
+}
+
+function mmClassName(offer, rankedOffers) {
+  if (!isMmCarsProvider(offer?.provider)) {
+    return "";
+  }
+  if (!Number.isFinite(Number(offer.total_price)) || !isPlnOffer(offer)) {
+    return "mm";
+  }
+
+  const offers = Array.isArray(rankedOffers) ? rankedOffers.filter(Boolean) : [];
+  const rank = offers.findIndex((item) => item === offer);
+  const thresholdPerDay = 5;
+
+  if (rank === 0) {
+    const nextCompetitor = offers.find((item) => item && !isMmCarsProvider(item.provider) && isSameCurrency(offer, item));
+    if (!nextCompetitor || !Number.isFinite(Number(nextCompetitor.total_price))) {
+      return "mm";
+    }
+    const gapPerDay = (Number(nextCompetitor.total_price) - Number(offer.total_price)) / rentalDaysForComparison(offer, nextCompetitor);
+    return gapPerDay > thresholdPerDay ? "mm mm-top1-gap" : "mm";
+  }
+
+  const cheaperCompetitors = offers
+    .slice(0, rank < 0 ? offers.length : rank)
+    .filter((item) => item && !isMmCarsProvider(item.provider) && isSameCurrency(offer, item));
+  for (const competitor of cheaperCompetitors) {
+    if (!Number.isFinite(Number(competitor.total_price))) {
+      continue;
+    }
+    const gapPerDay = (Number(offer.total_price) - Number(competitor.total_price)) / rentalDaysForComparison(offer, competitor);
+    if (gapPerDay >= 0 && gapPerDay <= thresholdPerDay) {
+      return "mm mm-close";
+    }
+  }
+
+  return "mm";
 }
 
 function formatProvider(offer) {
@@ -121,8 +169,9 @@ function formatPrice(offer) {
 
 function buildOfferCells(offers, index) {
   const offer = offers[index];
-  const className = offerClass(offer);
-  return `<td${className}>${escapeHtml(formatProvider(offer))}</td><td${className}>${escapeHtml(formatPrice(offer))}</td>`;
+  const className = mmClassName(offer, offers);
+  const classAttribute = className ? ` class="${className}"` : "";
+  return `<td${classAttribute}>${escapeHtml(formatProvider(offer))}</td><td${classAttribute}>${escapeHtml(formatPrice(offer))}</td>`;
 }
 
 function buildScenarioTable(scenario, index, total) {
@@ -171,6 +220,10 @@ function buildHtmlReport(rows, generatedAt = new Date().toISOString()) {
       --green: #22e642;
       --yellow-bg: #caa300;
       --yellow-text: #253040;
+      --blue-bg: #1e5bd7;
+      --blue-text: #ffffff;
+      --good-bg: #14823b;
+      --good-text: #ffffff;
     }
     * { box-sizing: border-box; }
     body {
@@ -190,15 +243,23 @@ function buildHtmlReport(rows, generatedAt = new Date().toISOString()) {
     td { color: var(--green); font-weight: 700; }
     td.index { color: var(--text); width: 72px; }
     .mm { background: var(--yellow-bg); color: var(--yellow-text); }
+    .mm-close { background: var(--blue-bg); color: var(--blue-text); }
+    .mm-top1-gap { background: var(--good-bg); color: var(--good-text); }
     .legend { margin: 0 0 18px; color: var(--muted); font-size: 13px; }
     .badge { display: inline-block; padding: 2px 7px; background: var(--yellow-bg); color: var(--yellow-text); }
+    .badge.close { background: var(--blue-bg); color: var(--blue-text); }
+    .badge.good { background: var(--good-bg); color: var(--good-text); }
     @media (max-width: 980px) { body { padding: 14px; } table { min-width: 900px; } }
   </style>
 </head>
 <body>
   <h1>VipCars report</h1>
   <div class="meta">Generated at: ${escapeHtml(generatedAt)} | Source: https://www.vipcars.com</div>
-  <div class="legend"><span class="badge">MM Cars Rental</span> MM Cars Rental in table</div>
+  <div class="legend">
+    <span class="badge">MM Cars Rental</span> MM Cars Rental in table
+    <span class="badge close">MM close</span> MM max 5 PLN/day above a cheaper competitor
+    <span class="badge good">MM top1 gap</span> MM is cheapest and next competitor is over 5 PLN/day more expensive
+  </div>
   ${scenarios.map((scenario, index) => buildScenarioTable(scenario, index, scenarios.length)).join("\n") || "<p>No offers extracted.</p>"}
 </body>
 </html>`;
