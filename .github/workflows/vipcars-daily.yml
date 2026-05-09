@@ -125,10 +125,10 @@ jobs:
 
           node src/vipcars/cli.js \
             --config vipcars.config.example.json \
-            --locations="${{ steps.options.outputs.locations }}" \
-            --pickup-weekdays="${{ steps.options.outputs.pickup_weekdays }}" \
-            --durations-days="${{ steps.options.outputs.durations }}" \
-            --timeout-ms=45000 \
+            --locations "${{ steps.options.outputs.locations }}" \
+            --pickup-weekdays "${{ steps.options.outputs.pickup_weekdays }}" \
+            --durations-days "${{ steps.options.outputs.durations }}" \
+            --timeout-ms 45000 \
             --output-csv output/vipcars-results.csv \
             2> >(tee output/vipcars-run-error.txt >&2) \
             | tee output/vipcars-run-log.txt
