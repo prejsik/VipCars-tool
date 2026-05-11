@@ -100,8 +100,8 @@ function isMmCarsProvider(value) {
   return String(value || "").trim().toLowerCase().includes("mm cars rental");
 }
 
-function isPlnOffer(offer) {
-  return String(offer?.currency || "").toUpperCase() === "PLN";
+function isEurOffer(offer) {
+  return String(offer?.currency || "").toUpperCase() === "EUR";
 }
 
 function isSameCurrency(left, right) {
@@ -119,13 +119,13 @@ function mmClassName(offer, rankedOffers) {
   if (!isMmCarsProvider(offer?.provider)) {
     return "";
   }
-  if (!Number.isFinite(Number(offer.total_price)) || !isPlnOffer(offer)) {
+  if (!Number.isFinite(Number(offer.total_price)) || !isEurOffer(offer)) {
     return "mm";
   }
 
   const offers = Array.isArray(rankedOffers) ? rankedOffers.filter(Boolean) : [];
   const rank = offers.findIndex((item) => item === offer);
-  const thresholdPerDay = 5;
+  const thresholdPerDay = 1;
 
   if (rank === 0) {
     const nextCompetitor = offers.find((item) => item && !isMmCarsProvider(item.provider) && isSameCurrency(offer, item));
@@ -257,8 +257,8 @@ function buildHtmlReport(rows, generatedAt = new Date().toISOString()) {
   <div class="meta">Generated at: ${escapeHtml(generatedAt)} | Source: https://www.vipcars.com</div>
   <div class="legend">
     <span class="badge">MM Cars Rental</span> MM Cars Rental in table
-    <span class="badge close">MM close</span> MM max 5 PLN/day above a cheaper competitor
-    <span class="badge good">MM top1 gap</span> MM is cheapest and next competitor is over 5 PLN/day more expensive
+    <span class="badge close">MM close</span> MM max 1 EUR/day above a cheaper competitor
+    <span class="badge good">MM top1 gap</span> MM is cheapest and next competitor is over 1 EUR/day more expensive
   </div>
   ${scenarios.map((scenario, index) => buildScenarioTable(scenario, index, scenarios.length)).join("\n") || "<p>No offers extracted.</p>"}
 </body>

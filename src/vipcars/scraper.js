@@ -42,11 +42,12 @@ class VipCarsScraper {
   async runSingleLocation(browser, location) {
     const context = await browser.newContext({
       viewport: { width: 1440, height: 1200 },
-      locale: "pl-PL",
+      locale: "en-IE",
       extraHTTPHeaders: {
-        "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8"
+        "Accept-Language": "en-IE,en;q=0.9,pl;q=0.8"
       }
     });
+    await this.configureCurrency(context);
     await context.route("**/*", async (route) => {
       const type = route.request().resourceType();
       if (type === "image" || type === "font" || type === "media") {
@@ -81,9 +82,25 @@ class VipCarsScraper {
     const baseUrl = new URL(this.config.baseUrl);
     const prefix = baseUrl.pathname.replace(/\/+$/g, "");
     const url = new URL(`${prefix}/car-rental/poland/${slugifyLocation(location)}`, baseUrl.origin);
-    url.searchParams.set("currency", "PLN");
+    url.searchParams.set("curr", this.getCurrency());
+    url.searchParams.set("currency", this.getCurrency());
     url.searchParams.set("rc", "pl");
     return url.toString();
+  }
+
+  getCurrency() {
+    return normalizeCurrency(this.config.currency || "EUR") || "EUR";
+  }
+
+  async configureCurrency(context) {
+    const baseUrl = new URL(this.config.baseUrl);
+    const cookieUrl = baseUrl.origin;
+    const currency = this.getCurrency();
+    await context.addCookies([
+      { name: "currency", value: currency, url: cookieUrl },
+      { name: "rc", value: "pl", url: cookieUrl },
+      { name: "cor", value: "pl", url: cookieUrl }
+    ]).catch(() => {});
   }
 
   async extractLandingOffers(page, fallbackLocation) {
@@ -103,19 +120,20 @@ class VipCarsScraper {
           card.querySelector(".price")?.textContent ||
           ""
         );
-        const perDay = /\/\s*day|per day|\/\s*dzie[ńn]|za dzie[ńn]/i.test(normalize(card.textContent || ""));
+        const perDay = /\/\s*day|per day|\/\s*dzie|za dzie/i.test(normalize(card.textContent || ""));
         return { provider, priceText, perDay, location: defaultLocation };
       });
     }, fallbackLocation);
 
     const offers = [];
+    const desiredCurrency = this.getCurrency();
     for (const candidate of raw) {
       const money = parseMoney(candidate.priceText);
       if (!candidate.provider || !money) {
         continue;
       }
-      const currency = normalizeCurrency(money.currency || "PLN");
-      if (currency !== "PLN") {
+      const currency = normalizeCurrency(money.currency || desiredCurrency);
+      if (currency !== desiredCurrency) {
         continue;
       }
       const pricePerDay = Number(money.value);

@@ -171,7 +171,8 @@ function loadConfig(argv) {
   ];
 
   return {
-    baseUrl: normalizeWhitespace(merged.baseUrl || "https://www.vipcars.com/pl"),
+    baseUrl: normalizeWhitespace(merged.baseUrl || "https://www.vipcars.com"),
+    currency: normalizeWhitespace(merged.currency || "EUR").toUpperCase(),
     locations,
     pickupDate,
     pickupDateOptions: pickupWeekdays.length
@@ -206,6 +207,7 @@ Options:
   --pickup-time HH:MM
   --dropoff-date YYYY-MM-DD
   --dropoff-time HH:MM
+  --currency EUR
   --pickup-weekdays "thursday,friday"
   --durations-days "2,3"
   --output-csv PATH

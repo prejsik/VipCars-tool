@@ -25,11 +25,12 @@ runTest("loadConfig accepts CLI locations and dates", () => {
     "--dropoff-time", "10:00"
   ]);
   assert.deepEqual(config.locations, ["Warsaw"]);
-  assert.equal(config.baseUrl, "https://www.vipcars.com/pl");
+  assert.equal(config.baseUrl, "https://www.vipcars.com");
+  assert.equal(config.currency, "EUR");
 });
 
 runTest("parseMoney handles VipCars price labels", () => {
-  assert.deepEqual(parseMoney("PLN 26.13"), { value: 26.13, currency: "PLN", raw: "PLN 26.13" });
+  assert.deepEqual(parseMoney("EUR 26.13"), { value: 26.13, currency: "EUR", raw: "EUR 26.13" });
 });
 
 runTest("slugifyLocation builds VipCars landing slugs", () => {
@@ -47,7 +48,7 @@ runTest("CSV and HTML report render top offers", () => {
       provider_rating: "",
       total_price: 52.26,
       price_per_day: 26.13,
-      currency: "PLN",
+      currency: "EUR",
       source: "landing"
     }
   ]);
@@ -55,7 +56,7 @@ runTest("CSV and HTML report render top offers", () => {
   const html = buildHtmlReport(rows, "2026-05-15T00:00:00.000Z");
   assert.match(html, /VipCars report/);
   assert.match(html, /Thrifty/);
-  assert.match(html, /52\.26 PLN/);
+  assert.match(html, /52\.26 EUR/);
 });
 
 runTest("HTML report applies all MM highlight colors", () => {
@@ -68,7 +69,7 @@ runTest("HTML report applies all MM highlight colors", () => {
       provider: "MM Cars Rental",
       provider_rating: "",
       total_price: "100",
-      currency: "PLN"
+      currency: "EUR"
     },
     {
       location: "Warsaw",
@@ -78,7 +79,7 @@ runTest("HTML report applies all MM highlight colors", () => {
       provider: "Alamo",
       provider_rating: "",
       total_price: "120",
-      currency: "PLN"
+      currency: "EUR"
     },
     {
       location: "Krakow",
@@ -88,7 +89,7 @@ runTest("HTML report applies all MM highlight colors", () => {
       provider: "Alamo",
       provider_rating: "",
       total_price: "100",
-      currency: "PLN"
+      currency: "EUR"
     },
     {
       location: "Krakow",
@@ -97,8 +98,8 @@ runTest("HTML report applies all MM highlight colors", () => {
       dropoff_date: "2026-05-17",
       provider: "MM Cars Rental",
       provider_rating: "",
-      total_price: "108",
-      currency: "PLN"
+      total_price: "101.5",
+      currency: "EUR"
     }
   ], "2026-05-15T00:00:00.000Z");
 

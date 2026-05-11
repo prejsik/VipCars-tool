@@ -28,6 +28,10 @@ on:
         description: "Comma-separated rental durations in days"
         required: true
         default: "2,3"
+      currency:
+        description: "VipCars display currency"
+        required: true
+        default: "EUR"
 
 permissions:
   contents: read
@@ -38,9 +42,11 @@ env:
   SCHEDULE_LOCATIONS: "Warsaw,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
   SCHEDULE_PICKUP_WEEKDAYS: "thursday,friday"
   SCHEDULE_DURATIONS: "2,3"
+  SCHEDULE_CURRENCY: "EUR"
   PUSH_TEST_LOCATIONS: "Warsaw"
   PUSH_TEST_PICKUP_WEEKDAYS: "friday"
   PUSH_TEST_DURATIONS: "2"
+  PUSH_TEST_CURRENCY: "EUR"
 
 jobs:
   vipcars:
@@ -101,20 +107,24 @@ jobs:
           INPUT_LOCATIONS: ${{ inputs.locations }}
           INPUT_PICKUP_WEEKDAYS: ${{ inputs.pickup_weekdays }}
           INPUT_DURATIONS: ${{ inputs.durations }}
+          INPUT_CURRENCY: ${{ inputs.currency }}
         run: |
           if [[ "${{ github.event_name }}" == "push" ]]; then
             default_locations="$PUSH_TEST_LOCATIONS"
             default_pickup_weekdays="$PUSH_TEST_PICKUP_WEEKDAYS"
             default_durations="$PUSH_TEST_DURATIONS"
+            default_currency="$PUSH_TEST_CURRENCY"
           else
             default_locations="$SCHEDULE_LOCATIONS"
             default_pickup_weekdays="$SCHEDULE_PICKUP_WEEKDAYS"
             default_durations="$SCHEDULE_DURATIONS"
+            default_currency="$SCHEDULE_CURRENCY"
           fi
 
           echo "locations=${INPUT_LOCATIONS:-$default_locations}" >> "$GITHUB_OUTPUT"
           echo "pickup_weekdays=${INPUT_PICKUP_WEEKDAYS:-$default_pickup_weekdays}" >> "$GITHUB_OUTPUT"
           echo "durations=${INPUT_DURATIONS:-$default_durations}" >> "$GITHUB_OUTPUT"
+          echo "currency=${INPUT_CURRENCY:-$default_currency}" >> "$GITHUB_OUTPUT"
 
       - name: Run VipCars scraper
         if: steps.gate.outputs.should_run == 'true'
@@ -128,6 +138,7 @@ jobs:
             --locations "${{ steps.options.outputs.locations }}" \
             --pickup-weekdays "${{ steps.options.outputs.pickup_weekdays }}" \
             --durations-days "${{ steps.options.outputs.durations }}" \
+            --currency "${{ steps.options.outputs.currency }}" \
             --timeout-ms 45000 \
             --output-csv output/vipcars-results.csv \
             2> >(tee output/vipcars-run-error.txt >&2) \
@@ -184,31 +195,36 @@ jobs:
           retention-days: 14
 
       - name: Notify Telegram
-        if: steps.gate.outputs.should_run == 'true' && steps.upload.outputs['artifact-url'] != ''
+        if: steps.gate.outputs.should_run == 'true' && steps.pages-deployment.outputs.page_url != '' && steps.upload.outputs['artifact-url'] != ''
         shell: bash
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
           PAGE_URL: ${{ steps.pages-deployment.outputs.page_url }}
           ARTIFACT_URL: ${{ steps.upload.outputs['artifact-url'] }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
+          chat_ids="${TELEGRAM_CHAT_IDS:-$TELEGRAM_CHAT_ID}"
+          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$chat_ids" ]]; then
             echo "::warning::Telegram secrets are missing; notification skipped."
             exit 0
           fi
 
-          if [[ -n "$PAGE_URL" ]]; then
-            message=$(printf 'VipCars: wyniki sa gotowe.\n\nRaport HTML:\n%sreport.html\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$PAGE_URL" "$ARTIFACT_URL" "$RUN_URL")
-          else
-            message=$(printf 'VipCars: wyniki sa gotowe.\n\nArtifact:\n%s\n\nGitHub Actions run:\n%s\n' "$ARTIFACT_URL" "$RUN_URL")
-          fi
+          message=$(printf 'VipCars: raport HTML jest gotowy.\n\nRaport HTML:\n%sreport.html\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$PAGE_URL" "$ARTIFACT_URL" "$RUN_URL")
 
-          if ! curl --fail --show-error --silent \
-            --request POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=${message}" \
-            --data-urlencode "disable_web_page_preview=true"; then
-            echo "::warning::Telegram notification failed; scraper results were still uploaded."
-          fi
+          IFS=',' read -ra recipients <<< "$chat_ids"
+          for chat_id in "${recipients[@]}"; do
+            chat_id="$(echo "$chat_id" | xargs)"
+            if [[ -z "$chat_id" ]]; then
+              continue
+            fi
+            if ! curl --fail --show-error --silent \
+              --request POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${chat_id}" \
+              --data-urlencode "text=${message}" \
+              --data-urlencode "disable_web_page_preview=true"; then
+              echo "::warning::Telegram notification failed for chat_id=${chat_id}; scraper results were still uploaded."
+            fi
+          done
