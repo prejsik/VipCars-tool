@@ -12,8 +12,9 @@ on:
       - "package.json"
       - "package-lock.json"
   schedule:
-    - cron: "30 4 * * *"
-    - cron: "30 5 * * *"
+    # Runs at 03:30 Europe/Warsaw year-round; two UTC crons handle CET/CEST.
+    - cron: "30 1 * * *"
+    - cron: "30 2 * * *"
   workflow_dispatch:
     inputs:
       locations:
@@ -71,7 +72,7 @@ jobs:
             exit 0
           fi
 
-          if [[ "$warsaw_hour" == "06" ]]; then
+          if [[ "$warsaw_hour" == "03" ]]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_run=false" >> "$GITHUB_OUTPUT"
