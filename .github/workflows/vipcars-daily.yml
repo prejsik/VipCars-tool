@@ -213,7 +213,7 @@ jobs:
 
           message=$(printf 'VipCars: raport HTML jest gotowy.\n\nRaport HTML:\n%sreport.html\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$PAGE_URL" "$ARTIFACT_URL" "$RUN_URL")
 
-          # TELEGRAM_CHAT_IDS can contain one or more comma-separated recipients.
+          # TELEGRAM_CHAT_IDS can contain one or more comma-separated private chats, groups, or channels.
           IFS=',' read -ra recipients <<< "$chat_ids"
           for chat_id in "${recipients[@]}"; do
             chat_id="$(echo "$chat_id" | xargs)"
