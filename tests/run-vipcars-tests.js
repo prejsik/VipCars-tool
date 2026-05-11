@@ -107,6 +107,7 @@ runTest("HTML report applies all MM highlight colors", () => {
   assert.match(html, /mm mm-close/);
   assert.match(html, /badge close/);
   assert.match(html, /badge good/);
+  assert.match(html, /2\.5 EUR\/day/);
 });
 
 if (!process.exitCode) {
