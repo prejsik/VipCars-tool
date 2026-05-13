@@ -63,16 +63,22 @@ jobs:
         id: gate
         shell: bash
         run: |
-          warsaw_hour="$(TZ=Europe/Warsaw date +%H)"
           warsaw_now="$(TZ=Europe/Warsaw date '+%Y-%m-%d %H:%M:%S %Z')"
+          warsaw_offset="$(TZ=Europe/Warsaw date +%z)"
+          trigger_schedule="${{ github.event.schedule }}"
           echo "Warsaw time now: $warsaw_now"
+          echo "Warsaw UTC offset: $warsaw_offset"
+          echo "Schedule trigger: ${trigger_schedule:-not-scheduled}"
 
           if [[ "${{ github.event_name }}" != "schedule" ]]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          if [[ "$warsaw_hour" == "03" ]]; then
+          # Use the cron expression instead of runner start hour because GitHub can delay scheduled jobs.
+          if [[ "$warsaw_offset" == "+0200" && "$trigger_schedule" == "30 1 * * *" ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$warsaw_offset" == "+0100" && "$trigger_schedule" == "30 2 * * *" ]]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_run=false" >> "$GITHUB_OUTPUT"
