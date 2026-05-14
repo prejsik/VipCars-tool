@@ -255,8 +255,20 @@ function loadConfig(argv) {
     timeoutMs: Number.parseInt(merged.timeoutMs || merged["timeout-ms"] || "45000", 10),
     locationConcurrency: Number.parseInt(merged.locationConcurrency || merged["location-concurrency"] || "1", 10),
     headless: merged.headless !== false,
-    outputCsv: path.resolve(merged.outputCsv || merged["output-csv"] || path.join("output", "vipcars-results.csv")),
-    artifactsDir: path.resolve(merged.artifactsDir || merged["artifacts-dir"] || path.join("artifacts", "vipcars"))
+    outputCsv: path.resolve(
+      cli.outputCsv ||
+      cli["output-csv"] ||
+      fileConfig.outputCsv ||
+      fileConfig["output-csv"] ||
+      path.join("output", "vipcars-results.csv")
+    ),
+    artifactsDir: path.resolve(
+      cli.artifactsDir ||
+      cli["artifacts-dir"] ||
+      fileConfig.artifactsDir ||
+      fileConfig["artifacts-dir"] ||
+      path.join("artifacts", "vipcars")
+    )
   };
 }
 

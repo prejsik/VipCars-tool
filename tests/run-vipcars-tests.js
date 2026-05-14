@@ -105,6 +105,17 @@ runTest("CLI pickup weekdays and durations override config defaults", () => {
   assert.deepEqual(config.durationDays, [2]);
 });
 
+runTest("CLI output paths override config defaults", () => {
+  const config = loadConfig([
+    "--config", "vipcars.config.example.json",
+    "--output-csv", "output/vipcars-results-chunk-1.csv",
+    "--artifacts-dir", "artifacts/vipcars/chunk-1"
+  ]);
+
+  assert.equal(path.basename(config.outputCsv), "vipcars-results-chunk-1.csv");
+  assert.match(config.artifactsDir.replace(/\\/g, "/"), /artifacts\/vipcars\/chunk-1$/);
+});
+
 runTest("parseMoney handles VipCars price labels", () => {
   assert.deepEqual(parseMoney("EUR 26.13"), { value: 26.13, currency: "EUR", raw: "EUR 26.13" });
 });
