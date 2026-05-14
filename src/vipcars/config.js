@@ -77,6 +77,21 @@ function parseDurationDaysInput(rawValue, fieldName) {
   return [...new Set(values)].sort((left, right) => left - right);
 }
 
+function parseOptionalPositiveInteger(rawValue, fieldName) {
+  if (rawValue == null) {
+    return null;
+  }
+  const normalized = normalizeWhitespace(rawValue);
+  if (!normalized) {
+    return null;
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    throw new Error(`${fieldName} must be a positive integer. Received: ${rawValue}`);
+  }
+  return parsed;
+}
+
 function parsePickupWeekdaysInput(rawValue, fieldName) {
   if (rawValue == null) {
     return [];
@@ -124,6 +139,22 @@ function nearestWeekdayDateFromNow(targetWeekday) {
   return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 }
 
+function addDaysToDate(date, days) {
+  const result = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  result.setDate(result.getDate() + days);
+  return result;
+}
+
+function toIsoDate(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function rollingDateOptionsFromNow(dayCount) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Array.from({ length: dayCount }, (_, index) => toIsoDate(addDaysToDate(today, index)));
+}
+
 function loadConfig(argv) {
   const cli = parseCliArgs(argv);
   if (cli.help) {
@@ -157,31 +188,43 @@ function loadConfig(argv) {
   parseTime(pickupTime, "pickupTime");
   parseTime(dropoffTime, "dropoffTime");
 
-  const configuredDurations = parseDurationDaysInput([
-    ...parseDurationDaysInput(
-      fileConfig.durationsDays ?? fileConfig["durations-days"] ?? fileConfig.durationDays,
-      "durationsDays"
-    ),
-    ...parseDurationDaysInput(cli.durationDays, "duration-days")
-  ], "durationsDays");
+  const fileDurations = parseDurationDaysInput(
+    fileConfig.durationsDays ?? fileConfig["durations-days"] ?? fileConfig.durationDays,
+    "durationsDays"
+  );
+  const cliDurations = parseDurationDaysInput(cli.durationDays, "duration-days");
+  const configuredDurations = cliDurations.length ? cliDurations : fileDurations;
 
-  const pickupWeekdays = [
-    ...parsePickupWeekdaysInput(fileConfig.pickupWeekdays ?? fileConfig["pickup-weekdays"], "pickupWeekdays"),
-    ...parsePickupWeekdaysInput(cli.pickupWeekdays, "pickup-weekdays")
-  ];
+  const cliPickupWeekdays = parsePickupWeekdaysInput(cli.pickupWeekdays, "pickup-weekdays");
+  const filePickupWeekdays = parsePickupWeekdaysInput(fileConfig.pickupWeekdays ?? fileConfig["pickup-weekdays"], "pickupWeekdays");
+  const cliRollingPickupDays = parseOptionalPositiveInteger(
+    cli.pickupRollingDays ?? cli["pickup-rolling-days"] ?? cli.rollingPickupDays ?? cli["rolling-pickup-days"],
+    "pickupRollingDays"
+  );
+  const fileRollingPickupDays = parseOptionalPositiveInteger(
+    fileConfig.pickupRollingDays ?? fileConfig["pickup-rolling-days"] ?? fileConfig.rollingPickupDays ?? fileConfig["rolling-pickup-days"],
+    "pickupRollingDays"
+  );
+  const rollingPickupDays = cliRollingPickupDays ?? (cliPickupWeekdays.length ? null : fileRollingPickupDays);
+  const pickupWeekdays = rollingPickupDays
+    ? []
+    : [...filePickupWeekdays, ...cliPickupWeekdays];
 
   return {
     baseUrl: normalizeWhitespace(merged.baseUrl || "https://www.vipcars.com"),
     currency: normalizeWhitespace(merged.currency || "EUR").toUpperCase(),
     locations,
     pickupDate,
-    pickupDateOptions: pickupWeekdays.length
+    pickupDateOptions: rollingPickupDays
+      ? rollingDateOptionsFromNow(rollingPickupDays)
+      : pickupWeekdays.length
       ? [...new Set(pickupWeekdays)].map(nearestWeekdayDateFromNow).sort()
       : [pickupDate],
     pickupTime: normalizeWhitespace(pickupTime),
     dropoffDate,
     dropoffTime: normalizeWhitespace(dropoffTime),
     durationDays: configuredDurations.length ? configuredDurations : [2],
+    pickupRollingDays: rollingPickupDays || 0,
     residenceCountry: normalizeWhitespace(merged.residenceCountry || merged["residence-country"] || "Poland"),
     driverAge: Number.parseInt(merged.driverAge || merged["driver-age"] || "30", 10),
     maxProvidersPerLocation: Number.parseInt(merged.maxProvidersPerLocation || "25", 10),
@@ -208,6 +251,7 @@ Options:
   --dropoff-date YYYY-MM-DD
   --dropoff-time HH:MM
   --currency EUR
+  --pickup-rolling-days 30
   --pickup-weekdays "thursday,friday"
   --durations-days "2,3"
   --output-csv PATH

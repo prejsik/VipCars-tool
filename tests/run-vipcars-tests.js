@@ -27,6 +27,36 @@ runTest("loadConfig accepts CLI locations and dates", () => {
   assert.deepEqual(config.locations, ["Warsaw"]);
   assert.equal(config.baseUrl, "https://www.vipcars.com");
   assert.equal(config.currency, "EUR");
+  assert.equal(config.pickupRollingDays, 0);
+});
+
+runTest("loadConfig builds rolling pickup dates", () => {
+  const config = loadConfig([
+    "--location", "Warsaw",
+    "--pickup-date", "2026-05-15",
+    "--pickup-time", "10:00",
+    "--dropoff-date", "2026-05-17",
+    "--dropoff-time", "10:00",
+    "--pickup-rolling-days", "3",
+    "--durations-days", "2,3,4"
+  ]);
+  const dayNumber = (isoDate) => Date.parse(`${isoDate}T00:00:00Z`) / 86400000;
+  assert.equal(config.pickupRollingDays, 3);
+  assert.equal(config.pickupDateOptions.length, 3);
+  assert.equal(dayNumber(config.pickupDateOptions[1]) - dayNumber(config.pickupDateOptions[0]), 1);
+  assert.equal(dayNumber(config.pickupDateOptions[2]) - dayNumber(config.pickupDateOptions[1]), 1);
+  assert.deepEqual(config.durationDays, [2, 3, 4]);
+});
+
+runTest("CLI pickup weekdays and durations override config defaults", () => {
+  const config = loadConfig([
+    "--config", "vipcars.config.example.json",
+    "--pickup-weekday", "friday",
+    "--duration-days", "2"
+  ]);
+  assert.equal(config.pickupRollingDays, 0);
+  assert.equal(config.pickupDateOptions.length, 1);
+  assert.deepEqual(config.durationDays, [2]);
 });
 
 runTest("parseMoney handles VipCars price labels", () => {

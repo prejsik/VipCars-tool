@@ -22,13 +22,17 @@ on:
         required: true
         default: "Warsaw,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
       pickup_weekdays:
-        description: "Comma-separated pickup weekdays"
-        required: true
-        default: "thursday,friday"
+        description: "Comma-separated pickup weekdays, used when pickup_rolling_days is empty"
+        required: false
+        default: ""
+      pickup_rolling_days:
+        description: "Number of consecutive pickup dates from today"
+        required: false
+        default: "30"
       durations:
         description: "Comma-separated rental durations in days"
         required: true
-        default: "2,3"
+        default: "2,3,4,5,6,7,8,9,10"
       currency:
         description: "VipCars display currency"
         required: true
@@ -41,11 +45,13 @@ permissions:
 
 env:
   SCHEDULE_LOCATIONS: "Warsaw,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
-  SCHEDULE_PICKUP_WEEKDAYS: "thursday,friday"
-  SCHEDULE_DURATIONS: "2,3"
+  SCHEDULE_PICKUP_WEEKDAYS: ""
+  SCHEDULE_PICKUP_ROLLING_DAYS: "30"
+  SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10"
   SCHEDULE_CURRENCY: "EUR"
   PUSH_TEST_LOCATIONS: "Warsaw"
   PUSH_TEST_PICKUP_WEEKDAYS: "friday"
+  PUSH_TEST_PICKUP_ROLLING_DAYS: ""
   PUSH_TEST_DURATIONS: "2"
   PUSH_TEST_CURRENCY: "EUR"
 
@@ -113,41 +119,58 @@ jobs:
         env:
           INPUT_LOCATIONS: ${{ inputs.locations }}
           INPUT_PICKUP_WEEKDAYS: ${{ inputs.pickup_weekdays }}
+          INPUT_PICKUP_ROLLING_DAYS: ${{ inputs.pickup_rolling_days }}
           INPUT_DURATIONS: ${{ inputs.durations }}
           INPUT_CURRENCY: ${{ inputs.currency }}
         run: |
           if [[ "${{ github.event_name }}" == "push" ]]; then
             default_locations="$PUSH_TEST_LOCATIONS"
             default_pickup_weekdays="$PUSH_TEST_PICKUP_WEEKDAYS"
+            default_pickup_rolling_days="$PUSH_TEST_PICKUP_ROLLING_DAYS"
             default_durations="$PUSH_TEST_DURATIONS"
             default_currency="$PUSH_TEST_CURRENCY"
           else
             default_locations="$SCHEDULE_LOCATIONS"
             default_pickup_weekdays="$SCHEDULE_PICKUP_WEEKDAYS"
+            default_pickup_rolling_days="$SCHEDULE_PICKUP_ROLLING_DAYS"
             default_durations="$SCHEDULE_DURATIONS"
             default_currency="$SCHEDULE_CURRENCY"
           fi
 
           echo "locations=${INPUT_LOCATIONS:-$default_locations}" >> "$GITHUB_OUTPUT"
           echo "pickup_weekdays=${INPUT_PICKUP_WEEKDAYS:-$default_pickup_weekdays}" >> "$GITHUB_OUTPUT"
+          echo "pickup_rolling_days=${INPUT_PICKUP_ROLLING_DAYS:-$default_pickup_rolling_days}" >> "$GITHUB_OUTPUT"
           echo "durations=${INPUT_DURATIONS:-$default_durations}" >> "$GITHUB_OUTPUT"
           echo "currency=${INPUT_CURRENCY:-$default_currency}" >> "$GITHUB_OUTPUT"
 
       - name: Run VipCars scraper
         if: steps.gate.outputs.should_run == 'true'
         shell: bash
+        env:
+          LOCATIONS: ${{ steps.options.outputs.locations }}
+          PICKUP_WEEKDAYS: ${{ steps.options.outputs.pickup_weekdays }}
+          PICKUP_ROLLING_DAYS: ${{ steps.options.outputs.pickup_rolling_days }}
+          DURATIONS: ${{ steps.options.outputs.durations }}
+          CURRENCY: ${{ steps.options.outputs.currency }}
         run: |
           mkdir -p output
           set -o pipefail
 
-          node src/vipcars/cli.js \
+          command=(node src/vipcars/cli.js \
             --config vipcars.config.example.json \
-            --locations "${{ steps.options.outputs.locations }}" \
-            --pickup-weekdays "${{ steps.options.outputs.pickup_weekdays }}" \
-            --durations-days "${{ steps.options.outputs.durations }}" \
-            --currency "${{ steps.options.outputs.currency }}" \
+            --locations "$LOCATIONS" \
+            --durations-days "$DURATIONS" \
+            --currency "$CURRENCY" \
             --timeout-ms 45000 \
-            --output-csv output/vipcars-results.csv \
+            --output-csv output/vipcars-results.csv)
+
+          if [[ -n "$PICKUP_ROLLING_DAYS" ]]; then
+            command+=(--pickup-rolling-days "$PICKUP_ROLLING_DAYS")
+          elif [[ -n "$PICKUP_WEEKDAYS" ]]; then
+            command+=(--pickup-weekdays "$PICKUP_WEEKDAYS")
+          fi
+
+          "${command[@]}" \
             2> >(tee output/vipcars-run-error.txt >&2) \
             | tee output/vipcars-run-log.txt
 

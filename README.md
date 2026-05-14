@@ -18,6 +18,10 @@ The workflow `.github/workflows/vipcars-daily.yml` publishes:
 https://prejsik.github.io/VipCars-tool/report.html
 ```
 
+## Scheduled scenarios
+
+The daily schedule checks 30 rolling pickup dates from the run date and rental durations from 2 to 10 days.
+
 ## Telegram notification
 
 The workflow sends a Telegram message after the GitHub Pages report is deployed, when these repository secrets are set:
