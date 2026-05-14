@@ -15,6 +15,9 @@ async function main() {
     console.log(`Locations: ${config.locations.join(", ")}`);
     console.log(`Pickup options: ${config.pickupDateOptions.join(", ")} ${config.pickupTime}`);
     console.log(`Durations (days): ${config.durationDays.join(", ")}`);
+    if (config.pickupChunkTotal > 1) {
+      console.log(`Pickup chunk: ${config.pickupChunkIndex}/${config.pickupChunkTotal}`);
+    }
     console.log("");
 
     const { VipCarsScraper } = require("./scraper");

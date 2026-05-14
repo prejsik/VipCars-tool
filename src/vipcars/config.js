@@ -155,6 +155,18 @@ function rollingDateOptionsFromNow(dayCount) {
   return Array.from({ length: dayCount }, (_, index) => toIsoDate(addDaysToDate(today, index)));
 }
 
+function chunkValues(values, chunkIndex, chunkTotal) {
+  if (!chunkTotal || chunkTotal <= 1) {
+    return values;
+  }
+  if (!chunkIndex || chunkIndex < 1 || chunkIndex > chunkTotal) {
+    throw new Error(`pickupChunkIndex must be between 1 and pickupChunkTotal. Received: ${chunkIndex}/${chunkTotal}`);
+  }
+  const start = Math.floor((values.length * (chunkIndex - 1)) / chunkTotal);
+  const end = Math.floor((values.length * chunkIndex) / chunkTotal);
+  return values.slice(start, end);
+}
+
 function loadConfig(argv) {
   const cli = parseCliArgs(argv);
   if (cli.help) {
@@ -209,17 +221,29 @@ function loadConfig(argv) {
   const pickupWeekdays = rollingPickupDays
     ? []
     : [...filePickupWeekdays, ...cliPickupWeekdays];
+  const pickupChunkIndex = parseOptionalPositiveInteger(
+    cli.pickupChunkIndex ?? cli["pickup-chunk-index"],
+    "pickupChunkIndex"
+  );
+  const pickupChunkTotal = parseOptionalPositiveInteger(
+    cli.pickupChunkTotal ?? cli["pickup-chunk-total"],
+    "pickupChunkTotal"
+  ) || 1;
+  const allPickupDateOptions = rollingPickupDays
+    ? rollingDateOptionsFromNow(rollingPickupDays)
+    : pickupWeekdays.length
+    ? [...new Set(pickupWeekdays)].map(nearestWeekdayDateFromNow).sort()
+    : [pickupDate];
+  const pickupDateOptions = chunkValues(allPickupDateOptions, pickupChunkIndex || 1, pickupChunkTotal);
 
   return {
     baseUrl: normalizeWhitespace(merged.baseUrl || "https://www.vipcars.com"),
     currency: normalizeWhitespace(merged.currency || "EUR").toUpperCase(),
     locations,
     pickupDate,
-    pickupDateOptions: rollingPickupDays
-      ? rollingDateOptionsFromNow(rollingPickupDays)
-      : pickupWeekdays.length
-      ? [...new Set(pickupWeekdays)].map(nearestWeekdayDateFromNow).sort()
-      : [pickupDate],
+    pickupDateOptions,
+    pickupChunkIndex: pickupChunkIndex || 1,
+    pickupChunkTotal,
     pickupTime: normalizeWhitespace(pickupTime),
     dropoffDate,
     dropoffTime: normalizeWhitespace(dropoffTime),
@@ -252,6 +276,8 @@ Options:
   --dropoff-time HH:MM
   --currency EUR
   --pickup-rolling-days 30
+  --pickup-chunk-index 1
+  --pickup-chunk-total 3
   --pickup-weekdays "thursday,friday"
   --durations-days "2,3"
   --output-csv PATH

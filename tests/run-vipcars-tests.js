@@ -1,6 +1,10 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 const { loadConfig } = require("../src/vipcars/config");
+const { mergeCsvFiles } = require("../src/vipcars/mergeCsv");
 const { parseMoney, toCsv } = require("../src/vipcars/utils");
 const { buildHtmlReport, parseCsv } = require("../src/vipcars/reportHtml");
 const { slugifyLocation } = require("../src/vipcars/scraper");
@@ -48,6 +52,48 @@ runTest("loadConfig builds rolling pickup dates", () => {
   assert.deepEqual(config.durationDays, [2, 3, 4]);
 });
 
+runTest("loadConfig chunks rolling pickup dates", () => {
+  const firstChunk = loadConfig([
+    "--location", "Warsaw",
+    "--pickup-date", "2026-05-15",
+    "--pickup-time", "10:00",
+    "--dropoff-date", "2026-05-17",
+    "--dropoff-time", "10:00",
+    "--pickup-rolling-days", "9",
+    "--pickup-chunk-index", "1",
+    "--pickup-chunk-total", "3"
+  ]);
+  const secondChunk = loadConfig([
+    "--location", "Warsaw",
+    "--pickup-date", "2026-05-15",
+    "--pickup-time", "10:00",
+    "--dropoff-date", "2026-05-17",
+    "--dropoff-time", "10:00",
+    "--pickup-rolling-days", "9",
+    "--pickup-chunk-index", "2",
+    "--pickup-chunk-total", "3"
+  ]);
+  const thirdChunk = loadConfig([
+    "--location", "Warsaw",
+    "--pickup-date", "2026-05-15",
+    "--pickup-time", "10:00",
+    "--dropoff-date", "2026-05-17",
+    "--dropoff-time", "10:00",
+    "--pickup-rolling-days", "9",
+    "--pickup-chunk-index", "3",
+    "--pickup-chunk-total", "3"
+  ]);
+
+  assert.equal(firstChunk.pickupDateOptions.length, 3);
+  assert.equal(secondChunk.pickupDateOptions.length, 3);
+  assert.equal(thirdChunk.pickupDateOptions.length, 3);
+  assert.equal(new Set([
+    ...firstChunk.pickupDateOptions,
+    ...secondChunk.pickupDateOptions,
+    ...thirdChunk.pickupDateOptions
+  ]).size, 9);
+});
+
 runTest("CLI pickup weekdays and durations override config defaults", () => {
   const config = loadConfig([
     "--config", "vipcars.config.example.json",
@@ -87,6 +133,51 @@ runTest("CSV and HTML report render top offers", () => {
   assert.match(html, /VipCars report/);
   assert.match(html, /Thrifty/);
   assert.match(html, /52\.26 EUR/);
+});
+
+runTest("mergeCsvFiles combines chunk result files", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "vipcars-merge-"));
+  const chunkOne = path.join(tempDir, "one");
+  const chunkTwo = path.join(tempDir, "two");
+  fs.mkdirSync(chunkOne);
+  fs.mkdirSync(chunkTwo);
+
+  fs.writeFileSync(path.join(chunkOne, "vipcars-results-chunk-1.csv"), toCsv([
+    {
+      location: "Warsaw",
+      duration_days: 2,
+      pickup_date: "2026-05-15",
+      dropoff_date: "2026-05-17",
+      provider: "Thrifty",
+      provider_rating: "",
+      total_price: 52.26,
+      price_per_day: 26.13,
+      currency: "EUR",
+      source: "landing"
+    }
+  ]), "utf8");
+  fs.writeFileSync(path.join(chunkTwo, "vipcars-results-chunk-2.csv"), toCsv([
+    {
+      location: "Krakow",
+      duration_days: 3,
+      pickup_date: "2026-05-16",
+      dropoff_date: "2026-05-19",
+      provider: "Alamo",
+      provider_rating: "",
+      total_price: 90,
+      price_per_day: 30,
+      currency: "EUR",
+      source: "landing"
+    }
+  ]), "utf8");
+
+  const outputPath = path.join(tempDir, "merged.csv");
+  const summary = mergeCsvFiles(tempDir, outputPath);
+  const mergedRows = parseCsv(fs.readFileSync(outputPath, "utf8"));
+  assert.equal(summary.files.length, 2);
+  assert.equal(summary.rowCount, 2);
+  assert.equal(mergedRows.length, 2);
+  assert.deepEqual(mergedRows.map((row) => row.location), ["Warsaw", "Krakow"]);
 });
 
 runTest("HTML report applies all MM highlight colors", () => {

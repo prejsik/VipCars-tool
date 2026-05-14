@@ -54,15 +54,21 @@ env:
   PUSH_TEST_PICKUP_ROLLING_DAYS: ""
   PUSH_TEST_DURATIONS: "2"
   PUSH_TEST_CURRENCY: "EUR"
+  SCHEDULE_CHUNK_COUNT: "3"
 
 jobs:
-  vipcars:
-    name: Run VipCars scraper
+  prepare:
+    name: Resolve VipCars run options
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    environment:
-      name: github-pages
-      url: ${{ steps.pages-deployment.outputs.page_url }}
+    outputs:
+      should_run: ${{ steps.gate.outputs.should_run }}
+      locations: ${{ steps.options.outputs.locations }}
+      pickup_weekdays: ${{ steps.options.outputs.pickup_weekdays }}
+      pickup_rolling_days: ${{ steps.options.outputs.pickup_rolling_days }}
+      durations: ${{ steps.options.outputs.durations }}
+      currency: ${{ steps.options.outputs.currency }}
+      chunk_total: ${{ steps.options.outputs.chunk_total }}
+      chunk_matrix: ${{ steps.options.outputs.chunk_matrix }}
 
     steps:
       - name: Check Warsaw schedule gate
@@ -90,28 +96,6 @@ jobs:
             echo "should_run=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Checkout repository
-        if: steps.gate.outputs.should_run == 'true'
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        if: steps.gate.outputs.should_run == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Install Node dependencies
-        if: steps.gate.outputs.should_run == 'true'
-        run: npm install
-
-      - name: Install Playwright Chromium
-        if: steps.gate.outputs.should_run == 'true'
-        run: npx playwright install --with-deps chromium
-
-      - name: Run tests
-        if: steps.gate.outputs.should_run == 'true'
-        run: npm test
-
       - name: Resolve run options
         if: steps.gate.outputs.should_run == 'true'
         id: options
@@ -129,31 +113,103 @@ jobs:
             default_pickup_rolling_days="$PUSH_TEST_PICKUP_ROLLING_DAYS"
             default_durations="$PUSH_TEST_DURATIONS"
             default_currency="$PUSH_TEST_CURRENCY"
+            chunk_total="1"
           else
             default_locations="$SCHEDULE_LOCATIONS"
             default_pickup_weekdays="$SCHEDULE_PICKUP_WEEKDAYS"
             default_pickup_rolling_days="$SCHEDULE_PICKUP_ROLLING_DAYS"
             default_durations="$SCHEDULE_DURATIONS"
             default_currency="$SCHEDULE_CURRENCY"
+            chunk_total="${SCHEDULE_CHUNK_COUNT:-3}"
           fi
 
-          echo "locations=${INPUT_LOCATIONS:-$default_locations}" >> "$GITHUB_OUTPUT"
-          echo "pickup_weekdays=${INPUT_PICKUP_WEEKDAYS:-$default_pickup_weekdays}" >> "$GITHUB_OUTPUT"
-          echo "pickup_rolling_days=${INPUT_PICKUP_ROLLING_DAYS:-$default_pickup_rolling_days}" >> "$GITHUB_OUTPUT"
-          echo "durations=${INPUT_DURATIONS:-$default_durations}" >> "$GITHUB_OUTPUT"
-          echo "currency=${INPUT_CURRENCY:-$default_currency}" >> "$GITHUB_OUTPUT"
+          locations="${INPUT_LOCATIONS:-$default_locations}"
+          pickup_weekdays="${INPUT_PICKUP_WEEKDAYS:-$default_pickup_weekdays}"
+          pickup_rolling_days="${INPUT_PICKUP_ROLLING_DAYS:-$default_pickup_rolling_days}"
+          durations="${INPUT_DURATIONS:-$default_durations}"
+          currency="${INPUT_CURRENCY:-$default_currency}"
+
+          if ! [[ "$pickup_rolling_days" =~ ^[0-9]+$ ]] || [[ "$pickup_rolling_days" -lt "$chunk_total" ]]; then
+            chunk_total="1"
+          fi
+
+          if [[ "$chunk_total" == "3" ]]; then
+            chunk_matrix='{"chunk":[1,2,3]}'
+          else
+            chunk_total="1"
+            chunk_matrix='{"chunk":[1]}'
+          fi
+
+          echo "locations=$locations" >> "$GITHUB_OUTPUT"
+          echo "pickup_weekdays=$pickup_weekdays" >> "$GITHUB_OUTPUT"
+          echo "pickup_rolling_days=$pickup_rolling_days" >> "$GITHUB_OUTPUT"
+          echo "durations=$durations" >> "$GITHUB_OUTPUT"
+          echo "currency=$currency" >> "$GITHUB_OUTPUT"
+          echo "chunk_total=$chunk_total" >> "$GITHUB_OUTPUT"
+          echo "chunk_matrix=$chunk_matrix" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Run VipCars tests
+    needs: prepare
+    if: needs.prepare.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Node dependencies
+        run: npm install
+
+      - name: Run tests
+        run: npm test
+
+  scrape:
+    name: Scrape VipCars chunk ${{ matrix.chunk }}/${{ needs.prepare.outputs.chunk_total }}
+    needs:
+      - prepare
+      - test
+    if: needs.prepare.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.chunk_matrix) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Node dependencies
+        run: npm install
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
 
       - name: Run VipCars scraper
-        if: steps.gate.outputs.should_run == 'true'
         shell: bash
         env:
-          LOCATIONS: ${{ steps.options.outputs.locations }}
-          PICKUP_WEEKDAYS: ${{ steps.options.outputs.pickup_weekdays }}
-          PICKUP_ROLLING_DAYS: ${{ steps.options.outputs.pickup_rolling_days }}
-          DURATIONS: ${{ steps.options.outputs.durations }}
-          CURRENCY: ${{ steps.options.outputs.currency }}
+          LOCATIONS: ${{ needs.prepare.outputs.locations }}
+          PICKUP_WEEKDAYS: ${{ needs.prepare.outputs.pickup_weekdays }}
+          PICKUP_ROLLING_DAYS: ${{ needs.prepare.outputs.pickup_rolling_days }}
+          DURATIONS: ${{ needs.prepare.outputs.durations }}
+          CURRENCY: ${{ needs.prepare.outputs.currency }}
+          CHUNK_INDEX: ${{ matrix.chunk }}
+          CHUNK_TOTAL: ${{ needs.prepare.outputs.chunk_total }}
         run: |
           mkdir -p output
+          mkdir -p "artifacts/vipcars/chunk-${CHUNK_INDEX}"
           set -o pipefail
 
           command=(node src/vipcars/cli.js \
@@ -162,7 +218,8 @@ jobs:
             --durations-days "$DURATIONS" \
             --currency "$CURRENCY" \
             --timeout-ms 45000 \
-            --output-csv output/vipcars-results.csv)
+            --artifacts-dir "artifacts/vipcars/chunk-${CHUNK_INDEX}" \
+            --output-csv "output/vipcars-results-chunk-${CHUNK_INDEX}.csv")
 
           if [[ -n "$PICKUP_ROLLING_DAYS" ]]; then
             command+=(--pickup-rolling-days "$PICKUP_ROLLING_DAYS")
@@ -170,22 +227,69 @@ jobs:
             command+=(--pickup-weekdays "$PICKUP_WEEKDAYS")
           fi
 
-          "${command[@]}" \
-            2> >(tee output/vipcars-run-error.txt >&2) \
-            | tee output/vipcars-run-log.txt
-
-      - name: Generate VipCars HTML report
-        if: steps.gate.outputs.should_run == 'true' && always()
-        shell: bash
-        run: |
-          if [[ -f output/vipcars-results.csv ]]; then
-            node src/vipcars/reportHtml.js output/vipcars-results.csv output/vipcars-report.html
-          else
-            echo "::warning::VipCars CSV output is missing; report generation skipped."
+          if [[ "$CHUNK_TOTAL" != "1" ]]; then
+            command+=(--pickup-chunk-index "$CHUNK_INDEX" --pickup-chunk-total "$CHUNK_TOTAL")
           fi
 
+          "${command[@]}" \
+            2> >(tee "output/vipcars-run-error-chunk-${CHUNK_INDEX}.txt" >&2) \
+            | tee "output/vipcars-run-log-chunk-${CHUNK_INDEX}.txt"
+
+      - name: Upload VipCars chunk results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vipcars-results-chunk-${{ matrix.chunk }}-${{ github.run_number }}
+          path: |
+            output/vipcars-results-chunk-${{ matrix.chunk }}.csv
+            output/vipcars-run-log-chunk-${{ matrix.chunk }}.txt
+            output/vipcars-run-error-chunk-${{ matrix.chunk }}.txt
+            artifacts/vipcars/chunk-${{ matrix.chunk }}/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish:
+    name: Merge, publish, and notify
+    needs:
+      - prepare
+      - test
+      - scrape
+    if: always() && needs.prepare.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.pages-deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download VipCars chunk results
+        uses: actions/download-artifact@v4
+        with:
+          path: chunk-artifacts
+          pattern: vipcars-results-chunk-*-${{ github.run_number }}
+
+      - name: Merge VipCars chunk results
+        shell: bash
+        run: |
+          mkdir -p output
+          node src/vipcars/mergeCsv.js chunk-artifacts output/vipcars-results.csv
+          find chunk-artifacts -type f -name 'vipcars-run-log-chunk-*.txt' -exec cat {} + > output/vipcars-run-log.txt || true
+          find chunk-artifacts -type f -name 'vipcars-run-error-chunk-*.txt' -exec cat {} + > output/vipcars-run-error.txt || true
+
+      - name: Generate VipCars HTML report
+        shell: bash
+        run: node src/vipcars/reportHtml.js output/vipcars-results.csv output/vipcars-report.html
+
       - name: Prepare GitHub Pages site
-        if: steps.gate.outputs.should_run == 'true' && hashFiles('output/vipcars-report.html') != ''
+        if: hashFiles('output/vipcars-report.html') != ''
         run: |
           mkdir -p public
           cp output/vipcars-report.html public/index.html
@@ -195,23 +299,23 @@ jobs:
           cp output/vipcars-run-error.txt public/vipcars-run-error.txt || true
 
       - name: Configure GitHub Pages
-        if: steps.gate.outputs.should_run == 'true' && hashFiles('public/report.html') != ''
+        if: hashFiles('public/report.html') != ''
         uses: actions/configure-pages@v5
 
       - name: Upload GitHub Pages artifact
-        if: steps.gate.outputs.should_run == 'true' && hashFiles('public/report.html') != ''
+        if: hashFiles('public/report.html') != ''
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
       - name: Deploy GitHub Pages
         id: pages-deployment
-        if: steps.gate.outputs.should_run == 'true' && hashFiles('public/report.html') != ''
+        if: hashFiles('public/report.html') != ''
         uses: actions/deploy-pages@v4
 
-      - name: Upload VipCars results
+      - name: Upload VipCars merged results
         id: upload
-        if: steps.gate.outputs.should_run == 'true' && always()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: vipcars-results-${{ github.run_number }}
@@ -220,12 +324,12 @@ jobs:
             output/vipcars-report.html
             output/vipcars-run-log.txt
             output/vipcars-run-error.txt
-            artifacts/vipcars/**
+            chunk-artifacts/**
           if-no-files-found: warn
           retention-days: 14
 
       - name: Notify Telegram
-        if: steps.gate.outputs.should_run == 'true' && steps.pages-deployment.outputs.page_url != '' && steps.upload.outputs['artifact-url'] != ''
+        if: steps.pages-deployment.outputs.page_url != '' && steps.upload.outputs['artifact-url'] != ''
         shell: bash
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -234,6 +338,12 @@ jobs:
           PAGE_URL: ${{ steps.pages-deployment.outputs.page_url }}
           ARTIFACT_URL: ${{ steps.upload.outputs['artifact-url'] }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SCRAPE_RESULT: ${{ needs.scrape.result }}
+          CHUNK_TOTAL: ${{ needs.prepare.outputs.chunk_total }}
+          LOCATIONS: ${{ needs.prepare.outputs.locations }}
+          PICKUP_ROLLING_DAYS: ${{ needs.prepare.outputs.pickup_rolling_days }}
+          DURATIONS: ${{ needs.prepare.outputs.durations }}
+          CURRENCY: ${{ needs.prepare.outputs.currency }}
         run: |
           chat_ids="${TELEGRAM_CHAT_IDS:-$TELEGRAM_CHAT_ID}"
           if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$chat_ids" ]]; then
@@ -241,7 +351,12 @@ jobs:
             exit 0
           fi
 
-          message=$(printf 'VipCars: raport HTML jest gotowy.\n\nRaport HTML:\n%sreport.html\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$PAGE_URL" "$ARTIFACT_URL" "$RUN_URL")
+          status_text="gotowy"
+          if [[ "$SCRAPE_RESULT" != "success" ]]; then
+            status_text="gotowy, ale jeden z chunkow wymaga sprawdzenia (${SCRAPE_RESULT})"
+          fi
+
+          message=$(printf 'VipCars: raport HTML jest %s.\n\nZakres:\n- chunki: %s\n- lokalizacje: %s\n- rolling days: %s\n- durations: %s\n- waluta: %s\n\nRaport HTML:\n%sreport.html\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$status_text" "$CHUNK_TOTAL" "$LOCATIONS" "$PICKUP_ROLLING_DAYS" "$DURATIONS" "$CURRENCY" "$PAGE_URL" "$ARTIFACT_URL" "$RUN_URL")
 
           # TELEGRAM_CHAT_IDS can contain one or more comma-separated private chats, groups, or channels.
           IFS=',' read -ra recipients <<< "$chat_ids"
