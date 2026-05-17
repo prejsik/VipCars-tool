@@ -12,9 +12,9 @@ on:
       - "package.json"
       - "package-lock.json"
   schedule:
-    # Runs at 03:30 Europe/Warsaw year-round; two UTC crons handle CET/CEST.
+    # Runs at 02:30 Europe/Warsaw year-round; two UTC crons handle CET/CEST.
+    - cron: "30 0 * * *"
     - cron: "30 1 * * *"
-    - cron: "30 2 * * *"
   workflow_dispatch:
     inputs:
       locations:
@@ -88,9 +88,9 @@ jobs:
           fi
 
           # Use the cron expression instead of runner start hour because GitHub can delay scheduled jobs.
-          if [[ "$warsaw_offset" == "+0200" && "$trigger_schedule" == "30 1 * * *" ]]; then
+          if [[ "$warsaw_offset" == "+0200" && "$trigger_schedule" == "30 0 * * *" ]]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
-          elif [[ "$warsaw_offset" == "+0100" && "$trigger_schedule" == "30 2 * * *" ]]; then
+          elif [[ "$warsaw_offset" == "+0100" && "$trigger_schedule" == "30 1 * * *" ]]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_run=false" >> "$GITHUB_OUTPUT"
