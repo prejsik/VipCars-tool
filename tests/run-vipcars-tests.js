@@ -52,6 +52,34 @@ runTest("loadConfig builds rolling pickup dates", () => {
   assert.deepEqual(config.durationDays, [2, 3, 4]);
 });
 
+runTest("loadConfig skips today when pickup time has passed", () => {
+  const today = new Date();
+  const todayIso = [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, "0"),
+    String(today.getDate()).padStart(2, "0")
+  ].join("-");
+  const rollingConfig = loadConfig([
+    "--location", "Warsaw",
+    "--pickup-date", "2026-05-15",
+    "--pickup-time", "00:00",
+    "--dropoff-date", "2026-05-17",
+    "--dropoff-time", "10:00",
+    "--pickup-rolling-days", "2"
+  ]);
+  const weekdayConfig = loadConfig([
+    "--location", "Warsaw",
+    "--pickup-date", "2026-05-15",
+    "--pickup-time", "00:00",
+    "--dropoff-date", "2026-05-17",
+    "--dropoff-time", "10:00",
+    "--pickup-weekday", String(today.getDay())
+  ]);
+
+  assert.notEqual(rollingConfig.pickupDateOptions[0], todayIso);
+  assert.notEqual(weekdayConfig.pickupDateOptions[0], todayIso);
+});
+
 runTest("loadConfig chunks rolling pickup dates", () => {
   const firstChunk = loadConfig([
     "--location", "Warsaw",

@@ -131,12 +131,23 @@ function parsePickupWeekdaysInput(rawValue, fieldName) {
   return [...new Set(weekdays)];
 }
 
-function nearestWeekdayDateFromNow(targetWeekday) {
+function pickupStartDate(pickupTime) {
   const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const offset = (targetWeekday - today.getDay() + 7) % 7;
-  today.setDate(today.getDate() + offset);
-  return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const { hours, minutes } = parseTime(pickupTime, "pickupTime");
+  const pickupMinutes = hours * 60 + minutes;
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  if (currentMinutes >= pickupMinutes) {
+    startDate.setDate(startDate.getDate() + 1);
+  }
+  return startDate;
+}
+
+function nearestWeekdayDateFromNow(targetWeekday, pickupTime) {
+  const startDate = pickupStartDate(pickupTime);
+  const offset = (targetWeekday - startDate.getDay() + 7) % 7;
+  startDate.setDate(startDate.getDate() + offset);
+  return toIsoDate(startDate);
 }
 
 function addDaysToDate(date, days) {
@@ -149,10 +160,9 @@ function toIsoDate(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
-function rollingDateOptionsFromNow(dayCount) {
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  return Array.from({ length: dayCount }, (_, index) => toIsoDate(addDaysToDate(today, index)));
+function rollingDateOptionsFromNow(dayCount, pickupTime) {
+  const startDate = pickupStartDate(pickupTime);
+  return Array.from({ length: dayCount }, (_, index) => toIsoDate(addDaysToDate(startDate, index)));
 }
 
 function chunkValues(values, chunkIndex, chunkTotal) {
@@ -229,9 +239,9 @@ function loadConfig(argv) {
     "pickupChunkTotal"
   ) || 1;
   const allPickupDateOptions = rollingPickupDays
-    ? rollingDateOptionsFromNow(rollingPickupDays)
+    ? rollingDateOptionsFromNow(rollingPickupDays, pickupTime)
     : pickupWeekdays.length
-    ? [...new Set(pickupWeekdays)].map(nearestWeekdayDateFromNow).sort()
+    ? [...new Set(pickupWeekdays)].map((weekday) => nearestWeekdayDateFromNow(weekday, pickupTime)).sort()
     : [pickupDate];
   const pickupDateOptions = chunkValues(allPickupDateOptions, pickupChunkIndex || 1, pickupChunkTotal);
 
