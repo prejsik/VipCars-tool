@@ -179,10 +179,9 @@ function loadConfig(argv) {
   }
 
   const merged = { ...fileConfig, ...cli };
-  const locations = uniqueStrings([
-    ...(Array.isArray(fileConfig.locations) ? fileConfig.locations : []),
-    ...(cli.locations || [])
-  ]);
+  const locations = cli.locations?.length
+    ? uniqueStrings(cli.locations)
+    : uniqueStrings(Array.isArray(fileConfig.locations) ? fileConfig.locations : []);
 
   const pickupDate = merged.pickupDate ?? merged["pickup-date"];
   const pickupTime = merged.pickupTime ?? merged["pickup-time"];

@@ -7,7 +7,7 @@ const { loadConfig } = require("../src/vipcars/config");
 const { mergeCsvFiles } = require("../src/vipcars/mergeCsv");
 const { parseMoney, toCsv } = require("../src/vipcars/utils");
 const { buildHtmlReport, parseCsv } = require("../src/vipcars/reportHtml");
-const { slugifyLocation } = require("../src/vipcars/scraper");
+const { VipCarsScraper, resolveVipCarsLocation, slugifyLocation } = require("../src/vipcars/scraper");
 
 function runTest(name, fn) {
   try {
@@ -105,6 +105,17 @@ runTest("CLI pickup weekdays and durations override config defaults", () => {
   assert.deepEqual(config.durationDays, [2]);
 });
 
+runTest("CLI locations override config defaults", () => {
+  const config = loadConfig([
+    "--config", "vipcars.config.example.json",
+    "--locations", "Katowice",
+    "--pickup-weekday", "friday",
+    "--duration-days", "2"
+  ]);
+
+  assert.deepEqual(config.locations, ["Katowice"]);
+});
+
 runTest("CLI output paths override config defaults", () => {
   const config = loadConfig([
     "--config", "vipcars.config.example.json",
@@ -124,6 +135,36 @@ runTest("slugifyLocation builds VipCars landing slugs", () => {
   assert.equal(slugifyLocation("Kraków Balice"), "krakow-balice");
 });
 
+runTest("resolveVipCarsLocation maps Katowice to KTW", () => {
+  assert.deepEqual(resolveVipCarsLocation("Katowice"), {
+    name: "Katowice Pyrzowice Airport [KTW]",
+    code: "KTW",
+    countryId: "119",
+    cityId: "1735",
+    locationId: "667"
+  });
+});
+
+runTest("buildSearchUrl uses exact VipCars search parameters", () => {
+  const config = loadConfig([
+    "--location", "Katowice",
+    "--pickup-date", "2026-05-23",
+    "--pickup-time", "10:00",
+    "--dropoff-date", "2026-05-25",
+    "--dropoff-time", "10:00",
+    "--currency", "EUR"
+  ]);
+  const url = new URL(new VipCarsScraper(config).buildSearchUrl("Katowice"));
+  assert.equal(url.pathname, "/search/");
+  assert.equal(url.searchParams.get("pickup_location"), "667");
+  assert.equal(url.searchParams.get("dropoff_location"), "667");
+  assert.equal(url.searchParams.get("pickup_date"), "2026-05-23");
+  assert.equal(url.searchParams.get("pickup_time"), "10:00");
+  assert.equal(url.searchParams.get("dropoff_date"), "2026-05-25");
+  assert.equal(url.searchParams.get("dropoff_time"), "10:00");
+  assert.equal(url.searchParams.get("currency"), "EUR");
+});
+
 runTest("CSV and HTML report render top offers", () => {
   const csv = toCsv([
     {
@@ -136,7 +177,7 @@ runTest("CSV and HTML report render top offers", () => {
       total_price: 52.26,
       price_per_day: 26.13,
       currency: "EUR",
-      source: "landing"
+      source: "search"
     }
   ]);
   const rows = parseCsv(csv);
@@ -164,7 +205,7 @@ runTest("mergeCsvFiles combines chunk result files", () => {
       total_price: 52.26,
       price_per_day: 26.13,
       currency: "EUR",
-      source: "landing"
+      source: "search"
     }
   ]), "utf8");
   fs.writeFileSync(path.join(chunkTwo, "vipcars-results-chunk-2.csv"), toCsv([
