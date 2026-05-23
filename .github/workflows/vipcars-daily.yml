@@ -54,7 +54,7 @@ env:
   PUSH_TEST_PICKUP_ROLLING_DAYS: ""
   PUSH_TEST_DURATIONS: "2"
   PUSH_TEST_CURRENCY: "EUR"
-  SCHEDULE_CHUNK_COUNT: "3"
+  SCHEDULE_CHUNK_COUNT: "15"
 
 jobs:
   prepare:
@@ -129,16 +129,18 @@ jobs:
           durations="${INPUT_DURATIONS:-$default_durations}"
           currency="${INPUT_CURRENCY:-$default_currency}"
 
-          if ! [[ "$pickup_rolling_days" =~ ^[0-9]+$ ]] || [[ "$pickup_rolling_days" -lt "$chunk_total" ]]; then
+          if ! [[ "$chunk_total" =~ ^[0-9]+$ ]] || [[ "$chunk_total" -lt 1 ]]; then
             chunk_total="1"
           fi
 
-          if [[ "$chunk_total" == "3" ]]; then
-            chunk_matrix='{"chunk":[1,2,3]}'
-          else
+          if ! [[ "$pickup_rolling_days" =~ ^[0-9]+$ ]] || [[ "$pickup_rolling_days" -lt 1 ]]; then
             chunk_total="1"
-            chunk_matrix='{"chunk":[1]}'
+          elif [[ "$pickup_rolling_days" -lt "$chunk_total" ]]; then
+            chunk_total="$pickup_rolling_days"
           fi
+
+          chunk_values="$(seq -s, 1 "$chunk_total")"
+          chunk_matrix="{\"chunk\":[${chunk_values}]}"
 
           echo "locations=$locations" >> "$GITHUB_OUTPUT"
           echo "pickup_weekdays=$pickup_weekdays" >> "$GITHUB_OUTPUT"
@@ -353,7 +355,7 @@ jobs:
 
           status_text="gotowy"
           if [[ "$SCRAPE_RESULT" != "success" ]]; then
-            status_text="gotowy, ale jeden z chunkow wymaga sprawdzenia (${SCRAPE_RESULT})"
+            status_text="czesciowy; jeden z chunkow wymaga sprawdzenia (${SCRAPE_RESULT})"
           fi
 
           message=$(printf 'VipCars: raport HTML jest %s.\n\nZakres:\n- chunki: %s\n- lokalizacje: %s\n- rolling days: %s\n- durations: %s\n- waluta: %s\n\nRaport HTML:\n%sreport.html\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$status_text" "$CHUNK_TOTAL" "$LOCATIONS" "$PICKUP_ROLLING_DAYS" "$DURATIONS" "$CURRENCY" "$PAGE_URL" "$ARTIFACT_URL" "$RUN_URL")

@@ -23,6 +23,7 @@ async function main() {
     const { VipCarsScraper } = require("./scraper");
     const allResults = [];
     const allFailures = [];
+    writeTextFile(config.outputCsv, toCsv(allResults));
 
     for (const pickupDate of config.pickupDateOptions) {
       for (const durationDays of config.durationDays) {
@@ -37,6 +38,7 @@ async function main() {
         const { results, failures } = await scraper.run();
         allResults.push(...results);
         allFailures.push(...failures.map((failure) => ({ ...failure, pickupDate, durationDays })));
+        writeTextFile(config.outputCsv, toCsv(allResults));
         console.log("");
       }
     }
