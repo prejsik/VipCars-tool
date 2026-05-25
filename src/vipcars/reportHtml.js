@@ -91,7 +91,7 @@ function groupLocationOffers(rows) {
   return [...byLocation.entries()]
     .map(([location, offers]) => ({
       location,
-      offers: [...offers].sort((left, right) => Number(left.total_price) - Number(right.total_price))
+      offers: [...offers].sort((left, right) => dailyRate(left) - dailyRate(right))
     }))
     .sort((left, right) => left.location.localeCompare(right.location));
 }
@@ -108,18 +108,26 @@ function isSameCurrency(left, right) {
   return String(left?.currency || "").toUpperCase() === String(right?.currency || "").toUpperCase();
 }
 
-function rentalDaysForComparison(mmOffer, competitorOffer) {
-  const candidates = [mmOffer?.duration_days, competitorOffer?.duration_days]
-    .map((value) => Number(value))
-    .filter((value) => Number.isFinite(value) && value > 0);
-  return candidates[0] || 1;
+function dailyRate(offer) {
+  const rawRate = String(offer?.price_per_day ?? "").trim();
+  if (rawRate) {
+    const explicitRate = Number(rawRate);
+    if (Number.isFinite(explicitRate)) {
+      return explicitRate;
+    }
+  }
+  const totalPrice = Number(offer?.total_price);
+  const durationDays = Number(offer?.duration_days);
+  return Number.isFinite(totalPrice) && Number.isFinite(durationDays) && durationDays > 0
+    ? totalPrice / durationDays
+    : NaN;
 }
 
 function mmClassName(offer, rankedOffers) {
   if (!isMmCarsProvider(offer?.provider)) {
     return "";
   }
-  if (!Number.isFinite(Number(offer.total_price)) || !isEurOffer(offer)) {
+  if (!Number.isFinite(dailyRate(offer)) || !isEurOffer(offer)) {
     return "mm";
   }
 
@@ -129,10 +137,10 @@ function mmClassName(offer, rankedOffers) {
 
   if (rank === 0) {
     const nextCompetitor = offers.find((item) => item && !isMmCarsProvider(item.provider) && isSameCurrency(offer, item));
-    if (!nextCompetitor || !Number.isFinite(Number(nextCompetitor.total_price))) {
+    if (!nextCompetitor || !Number.isFinite(dailyRate(nextCompetitor))) {
       return "mm";
     }
-    const gapPerDay = (Number(nextCompetitor.total_price) - Number(offer.total_price)) / rentalDaysForComparison(offer, nextCompetitor);
+    const gapPerDay = dailyRate(nextCompetitor) - dailyRate(offer);
     return gapPerDay > thresholdPerDay ? "mm mm-top1-gap" : "mm";
   }
 
@@ -140,10 +148,10 @@ function mmClassName(offer, rankedOffers) {
     .slice(0, rank < 0 ? offers.length : rank)
     .filter((item) => item && !isMmCarsProvider(item.provider) && isSameCurrency(offer, item));
   for (const competitor of cheaperCompetitors) {
-    if (!Number.isFinite(Number(competitor.total_price))) {
+    if (!Number.isFinite(dailyRate(competitor))) {
       continue;
     }
-    const gapPerDay = (Number(offer.total_price) - Number(competitor.total_price)) / rentalDaysForComparison(offer, competitor);
+    const gapPerDay = dailyRate(offer) - dailyRate(competitor);
     if (gapPerDay >= 0 && gapPerDay <= thresholdPerDay) {
       return "mm mm-close";
     }
@@ -160,18 +168,19 @@ function formatProvider(offer) {
   return `${offer.provider || "Not available"}${rating}`;
 }
 
-function formatPrice(offer) {
-  if (!offer || !offer.total_price) {
+function formatDailyRate(offer) {
+  const rate = dailyRate(offer);
+  if (!Number.isFinite(rate)) {
     return "Not available";
   }
-  return `${Number(offer.total_price).toFixed(2)} ${offer.currency || ""}`.trim();
+  return `${rate.toFixed(2)} ${offer.currency || ""}/day`.trim();
 }
 
 function buildOfferCells(offers, index) {
   const offer = offers[index];
   const className = mmClassName(offer, offers);
   const classAttribute = className ? ` class="${className}"` : "";
-  return `<td${classAttribute}>${escapeHtml(formatProvider(offer))}</td><td${classAttribute}>${escapeHtml(formatPrice(offer))}</td>`;
+  return `<td${classAttribute}>${escapeHtml(formatProvider(offer))}</td><td${classAttribute}>${escapeHtml(formatDailyRate(offer))}</td>`;
 }
 
 function buildScenarioTable(scenario, index, total) {
@@ -191,11 +200,11 @@ function buildScenarioTable(scenario, index, total) {
           <th>(index)</th>
           <th>location</th>
           <th>top1_offer</th>
-          <th>top1_price</th>
+          <th>top1_rate_per_day</th>
           <th>top2_offer</th>
-          <th>top2_price</th>
+          <th>top2_rate_per_day</th>
           <th>top3_offer</th>
-          <th>top3_price</th>
+          <th>top3_rate_per_day</th>
         </tr>
       </thead>
       <tbody>${rows || `<tr><td colspan="8">No offers extracted.</td></tr>`}</tbody>

@@ -212,7 +212,21 @@ runTest("CSV and HTML report render top offers", () => {
   const html = buildHtmlReport(rows, "2026-05-15T00:00:00.000Z");
   assert.match(html, /VipCars report/);
   assert.match(html, /Thrifty/);
-  assert.match(html, /52\.26 EUR/);
+  assert.match(html, /26\.13 EUR\/day/);
+  assert.doesNotMatch(html, /52\.26 EUR/);
+
+  const fallbackHtml = buildHtmlReport([{
+    location: "Krakow",
+    duration_days: "3",
+    pickup_date: "2026-05-15",
+    dropoff_date: "2026-05-18",
+    provider: "Alamo",
+    provider_rating: "",
+    total_price: "90",
+    price_per_day: "",
+    currency: "EUR"
+  }], "2026-05-15T00:00:00.000Z");
+  assert.match(fallbackHtml, /30\.00 EUR\/day/);
 });
 
 runTest("mergeCsvFiles combines chunk result files", () => {
