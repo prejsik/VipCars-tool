@@ -125,7 +125,7 @@ class VipCarsScraper {
   }
 
   async loadSearchResultCards(page) {
-    const targetProviders = Math.max(1, Math.min(3, Number(this.config.maxProvidersPerLocation) || 3));
+    const targetProviders = Math.max(1, Math.min(4, Number(this.config.maxProvidersPerLocation) || 4));
     let previousCardCount = 0;
     let stableRounds = 0;
 

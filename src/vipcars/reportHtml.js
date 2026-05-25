@@ -144,15 +144,15 @@ function mmClassName(offer, rankedOffers) {
     return gapPerDay > thresholdPerDay ? "mm mm-top1-gap" : "mm";
   }
 
-  const cheaperCompetitors = offers
-    .slice(0, rank < 0 ? offers.length : rank)
-    .filter((item) => item && !isMmCarsProvider(item.provider) && isSameCurrency(offer, item));
-  for (const competitor of cheaperCompetitors) {
-    if (!Number.isFinite(dailyRate(competitor))) {
-      continue;
-    }
-    const gapPerDay = dailyRate(offer) - dailyRate(competitor);
-    if (gapPerDay >= 0 && gapPerDay <= thresholdPerDay) {
+  const previousCompetitor = rank > 0 ? offers[rank - 1] : null;
+  if (
+    previousCompetitor &&
+    !isMmCarsProvider(previousCompetitor.provider) &&
+    isSameCurrency(offer, previousCompetitor) &&
+    Number.isFinite(dailyRate(previousCompetitor))
+  ) {
+    const gapPerDay = dailyRate(offer) - dailyRate(previousCompetitor);
+    if (gapPerDay > 0 && gapPerDay <= thresholdPerDay) {
       return "mm mm-close";
     }
   }
@@ -190,6 +190,7 @@ function buildScenarioTable(scenario, index, total) {
         ${buildOfferCells(group.offers, 0)}
         ${buildOfferCells(group.offers, 1)}
         ${buildOfferCells(group.offers, 2)}
+        ${buildOfferCells(group.offers, 3)}
       </tr>`).join("\n");
 
   return `<section class="scenario">
@@ -205,9 +206,11 @@ function buildScenarioTable(scenario, index, total) {
           <th>top2_rate_per_day</th>
           <th>top3_offer</th>
           <th>top3_rate_per_day</th>
+          <th>top4_offer</th>
+          <th>top4_rate_per_day</th>
         </tr>
       </thead>
-      <tbody>${rows || `<tr><td colspan="8">No offers extracted.</td></tr>`}</tbody>
+      <tbody>${rows || `<tr><td colspan="10">No offers extracted.</td></tr>`}</tbody>
     </table>
   </section>`;
 }
@@ -231,8 +234,8 @@ function buildHtmlReport(rows, generatedAt = new Date().toISOString()) {
       --yellow-text: #253040;
       --blue-bg: #1e5bd7;
       --blue-text: #ffffff;
-      --good-bg: #14823b;
-      --good-text: #ffffff;
+      --red-bg: #c62828;
+      --red-text: #ffffff;
     }
     * { box-sizing: border-box; }
     body {
@@ -252,13 +255,13 @@ function buildHtmlReport(rows, generatedAt = new Date().toISOString()) {
     td { color: var(--green); font-weight: 700; }
     td.index { color: var(--text); width: 72px; }
     .mm { background: var(--yellow-bg); color: var(--yellow-text); }
-    .mm-close { background: var(--blue-bg); color: var(--blue-text); }
-    .mm-top1-gap { background: var(--good-bg); color: var(--good-text); }
+    .mm-close { background: var(--red-bg); color: var(--red-text); }
+    .mm-top1-gap { background: var(--blue-bg); color: var(--blue-text); }
     .legend { margin: 0 0 18px; color: var(--muted); font-size: 13px; }
     .badge { display: inline-block; padding: 2px 7px; background: var(--yellow-bg); color: var(--yellow-text); }
-    .badge.close { background: var(--blue-bg); color: var(--blue-text); }
-    .badge.good { background: var(--good-bg); color: var(--good-text); }
-    @media (max-width: 980px) { body { padding: 14px; } table { min-width: 900px; } }
+    .badge.close { background: var(--red-bg); color: var(--red-text); }
+    .badge.good { background: var(--blue-bg); color: var(--blue-text); }
+    @media (max-width: 980px) { body { padding: 14px; } table { min-width: 1100px; } }
   </style>
 </head>
 <body>
@@ -266,7 +269,7 @@ function buildHtmlReport(rows, generatedAt = new Date().toISOString()) {
   <div class="meta">Generated at: ${escapeHtml(generatedAt)} | Source: https://www.vipcars.com</div>
   <div class="legend">
     <span class="badge">MM Cars Rental</span> MM Cars Rental in table
-    <span class="badge close">MM close</span> MM max 2.5 EUR/day above a cheaper competitor
+    <span class="badge close">MM close</span> MM up to 2.5 EUR/day above the previous competitor
     <span class="badge good">MM top1 gap</span> MM is cheapest and next competitor is over 2.5 EUR/day more expensive
   </div>
   ${scenarios.map((scenario, index) => buildScenarioTable(scenario, index, scenarios.length)).join("\n") || "<p>No offers extracted.</p>"}

@@ -315,6 +315,76 @@ runTest("HTML report applies all MM highlight colors", () => {
       provider_rating: "",
       total_price: "101.5",
       currency: "EUR"
+    },
+    {
+      location: "Gdansk",
+      duration_days: "2",
+      pickup_date: "2026-05-15",
+      dropoff_date: "2026-05-17",
+      provider: "Alamo",
+      provider_rating: "",
+      price_per_day: "20",
+      currency: "EUR"
+    },
+    {
+      location: "Gdansk",
+      duration_days: "2",
+      pickup_date: "2026-05-15",
+      dropoff_date: "2026-05-17",
+      provider: "Hertz",
+      provider_rating: "",
+      price_per_day: "22",
+      currency: "EUR"
+    },
+    {
+      location: "Gdansk",
+      duration_days: "2",
+      pickup_date: "2026-05-15",
+      dropoff_date: "2026-05-17",
+      provider: "MM Cars Rental",
+      provider_rating: "",
+      price_per_day: "24",
+      currency: "EUR"
+    },
+    {
+      location: "Wroclaw",
+      duration_days: "2",
+      pickup_date: "2026-05-15",
+      dropoff_date: "2026-05-17",
+      provider: "Alamo",
+      provider_rating: "",
+      price_per_day: "20",
+      currency: "EUR"
+    },
+    {
+      location: "Wroclaw",
+      duration_days: "2",
+      pickup_date: "2026-05-15",
+      dropoff_date: "2026-05-17",
+      provider: "Hertz",
+      provider_rating: "",
+      price_per_day: "23",
+      currency: "EUR"
+    },
+    {
+      location: "Wroclaw",
+      duration_days: "2",
+      pickup_date: "2026-05-15",
+      dropoff_date: "2026-05-17",
+      provider: "Avis",
+      provider_rating: "",
+      price_per_day: "26",
+      currency: "EUR"
+    },
+    {
+      location: "Wroclaw",
+      duration_days: "2",
+      pickup_date: "2026-05-15",
+      dropoff_date: "2026-05-17",
+      provider: "MM Cars Rental",
+      provider_rating: "",
+      price_per_day: "28",
+      currency: "EUR"
     }
   ], "2026-05-15T00:00:00.000Z");
 
@@ -322,6 +392,9 @@ runTest("HTML report applies all MM highlight colors", () => {
   assert.match(html, /mm mm-close/);
   assert.match(html, /badge close/);
   assert.match(html, /badge good/);
+  assert.match(html, /top4_rate_per_day/);
+  assert.match(html, /\.mm-close \{ background: var\(--red-bg\)/);
+  assert.match(html, /\.mm-top1-gap \{ background: var\(--blue-bg\)/);
   assert.match(html, /2\.5 EUR\/day/);
 });
 
