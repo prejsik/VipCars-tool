@@ -7,7 +7,12 @@ const { loadConfig } = require("../src/vipcars/config");
 const { mergeCsvFiles } = require("../src/vipcars/mergeCsv");
 const { parseMoney, toCsv } = require("../src/vipcars/utils");
 const { buildHtmlReport, parseCsv } = require("../src/vipcars/reportHtml");
-const { VipCarsScraper, resolveVipCarsLocation, slugifyLocation } = require("../src/vipcars/scraper");
+const {
+  VipCarsScraper,
+  isAutomaticTransmissionCandidate,
+  resolveVipCarsLocation,
+  slugifyLocation
+} = require("../src/vipcars/scraper");
 
 function runTest(name, fn) {
   try {
@@ -191,6 +196,23 @@ runTest("buildSearchUrl uses exact VipCars search parameters", () => {
   assert.equal(url.searchParams.get("dropoff_date"), "2026-05-25");
   assert.equal(url.searchParams.get("dropoff_time"), "10:00");
   assert.equal(url.searchParams.get("currency"), "EUR");
+});
+
+runTest("VipCars offers require automatic transmission", () => {
+  assert.equal(isAutomaticTransmissionCandidate({
+    automatic: true,
+    transmission: "Automatic Transmission",
+    carName: "Skoda Fabia Automatic or Similar"
+  }), true);
+  assert.equal(isAutomaticTransmissionCandidate({
+    automatic: false,
+    transmission: "Manual Transmission",
+    carName: "Citroen C3 or Similar"
+  }), false);
+  assert.equal(isAutomaticTransmissionCandidate({
+    transmission: "",
+    carName: "Dacia Jogger Automatic or Similar"
+  }), true);
 });
 
 runTest("CSV and HTML report render top offers", () => {

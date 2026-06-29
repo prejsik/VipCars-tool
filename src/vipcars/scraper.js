@@ -67,10 +67,11 @@ class VipCarsScraper {
       console.log(`    Search time: ${this.config.pickupTime} -> ${this.config.dropoffTime}`);
       await page.goto(this.buildSearchUrl(location), { waitUntil: "domcontentloaded" });
       await page.waitForSelector(".scv-car-box", { timeout: this.config.timeoutMs });
+      await this.applyAutomaticTransmissionFilter(page);
       await this.loadSearchResultCards(page);
       const offers = await this.extractSearchOffers(page, location);
       if (!offers.length) {
-        throw new Error("No VipCars search result cards were found.");
+        throw new Error("No automatic-transmission VipCars search result cards were found.");
       }
 
       const selected = selectBestOffersByProvider(offers, this.config.maxProvidersPerLocation);
@@ -132,8 +133,19 @@ class VipCarsScraper {
     for (let attempt = 0; attempt < 10; attempt += 1) {
       const state = await page.evaluate(() => {
         const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+        const isAutomaticCard = (card) => {
+          const specsText = normalize(card.querySelector(".scv-car-specs")?.textContent || "");
+          const carName = normalize(
+            card.querySelector(".scv-car-name")?.textContent ||
+            card.querySelector(".scv-car-img img[alt]")?.getAttribute("alt") ||
+            ""
+          );
+          return Boolean(card.querySelector(".scv-car-specs .scv-icon.autom")) ||
+            /\bautomatic\b/i.test(`${specsText} ${carName}`);
+        };
         const cards = Array.from(document.querySelectorAll(".scv-car-box"));
-        const providers = new Set(cards
+        const automaticCards = cards.filter(isAutomaticCard);
+        const providers = new Set(automaticCards
           .map((card) => normalize(
             card.querySelector(".scv-supp-info img[alt], img[id^='supplier_']")?.getAttribute("alt") ||
             card.querySelector(".scv-supp-info h5")?.textContent ||
@@ -145,6 +157,7 @@ class VipCarsScraper {
 
         return {
           cardCount: cards.length,
+          automaticCardCount: automaticCards.length,
           providerCount: providers.size,
           totalCount: Number.isFinite(totalCount) ? totalCount : cards.length
         };
@@ -164,8 +177,19 @@ class VipCarsScraper {
       await page.waitForFunction(
         ({ previousCount, desiredProviders }) => {
           const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+          const isAutomaticCard = (card) => {
+            const specsText = normalize(card.querySelector(".scv-car-specs")?.textContent || "");
+            const carName = normalize(
+              card.querySelector(".scv-car-name")?.textContent ||
+              card.querySelector(".scv-car-img img[alt]")?.getAttribute("alt") ||
+              ""
+            );
+            return Boolean(card.querySelector(".scv-car-specs .scv-icon.autom")) ||
+              /\bautomatic\b/i.test(`${specsText} ${carName}`);
+          };
           const cards = Array.from(document.querySelectorAll(".scv-car-box"));
-          const providers = new Set(cards
+          const automaticCards = cards.filter(isAutomaticCard);
+          const providers = new Set(automaticCards
             .map((card) => normalize(
               card.querySelector(".scv-supp-info img[alt], img[id^='supplier_']")?.getAttribute("alt") ||
               card.querySelector(".scv-supp-info h5")?.textContent ||
@@ -178,6 +202,42 @@ class VipCarsScraper {
         { timeout: Math.min(this.config.timeoutMs, 10000) }
       ).catch(() => {});
     }
+  }
+
+  async applyAutomaticTransmissionFilter(page) {
+    const filter = page.locator("#filter_automatic");
+    if (!(await filter.count().catch(() => 0))) {
+      console.log("    Automatic transmission filter: not found; filtering extracted cards only.");
+      return false;
+    }
+
+    if (!(await filter.isChecked().catch(() => false))) {
+      try {
+        await filter.check({ force: true });
+      } catch (error) {
+        try {
+          await page.locator("label", { has: filter }).click({ force: true });
+        } catch (fallbackError) {
+          console.log("    Automatic transmission filter: could not be clicked; filtering extracted cards only.");
+          return false;
+        }
+      }
+    }
+
+    await page.waitForFunction(() => {
+      const automaticFilter = document.getElementById("filter_automatic");
+      const busy = document.getElementById("page_busy")?.value || "";
+      const cards = Array.from(document.querySelectorAll(".scv-car-box"));
+      return automaticFilter?.checked && busy !== "1" && cards.length > 0;
+    }, null, { timeout: Math.min(this.config.timeoutMs, 15000) }).catch(() => {});
+
+    if (await filter.isChecked().catch(() => false)) {
+      console.log("    Automatic transmission filter: applied.");
+      return true;
+    }
+
+    console.log("    Automatic transmission filter: not confirmed; filtering extracted cards only.");
+    return false;
   }
 
   async extractSearchOffers(page, fallbackLocation) {
@@ -198,7 +258,17 @@ class VipCarsScraper {
           card.querySelector(".scv-car-price")?.textContent ||
           ""
         );
-        return { provider, rating, priceText, location: defaultLocation };
+        const carName = normalize(
+          card.querySelector(".scv-car-name")?.textContent ||
+          card.querySelector(".scv-car-img img[alt]")?.getAttribute("alt") ||
+          ""
+        );
+        const transmission = normalize(Array.from(card.querySelectorAll(".scv-car-specs li"))
+          .map((item) => item.textContent || "")
+          .find((text) => /transmission/i.test(text)) || "");
+        const automatic = Boolean(card.querySelector(".scv-car-specs .scv-icon.autom")) ||
+          /\bautomatic\b/i.test(`${transmission} ${carName}`);
+        return { provider, rating, priceText, location: defaultLocation, carName, transmission, automatic };
       });
     }, fallbackLocation);
 
@@ -206,7 +276,7 @@ class VipCarsScraper {
     const desiredCurrency = this.getCurrency();
     for (const candidate of raw) {
       const money = parseMoney(candidate.priceText);
-      if (!candidate.provider || !money) {
+      if (!candidate.provider || !money || !isAutomaticTransmissionCandidate(candidate)) {
         continue;
       }
       const currency = normalizeCurrency(money.currency || desiredCurrency);
@@ -310,6 +380,14 @@ function selectBestOffersByProvider(offers, maxProviders) {
     .slice(0, Number.isFinite(maxProviders) && maxProviders > 0 ? maxProviders : undefined);
 }
 
+function isAutomaticTransmissionCandidate(candidate) {
+  if (candidate?.automatic === true) {
+    return true;
+  }
+  const text = `${candidate?.transmission || ""} ${candidate?.carName || ""}`;
+  return /\bautomatic\b/i.test(text);
+}
+
 function slugifyLocation(value) {
   return normalizeWhitespace(value)
     .normalize("NFD")
@@ -319,4 +397,9 @@ function slugifyLocation(value) {
     .replace(/^-|-$/g, "");
 }
 
-module.exports = { VipCarsScraper, resolveVipCarsLocation, slugifyLocation };
+module.exports = {
+  VipCarsScraper,
+  isAutomaticTransmissionCandidate,
+  resolveVipCarsLocation,
+  slugifyLocation
+};
