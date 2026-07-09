@@ -10,6 +10,8 @@ const {
   writeTextFile
 } = require("./utils");
 
+const MAX_TIMEOUT_RETRIES = 2;
+
 class VipCarsScraper {
   constructor(config) {
     this.config = config;
@@ -23,7 +25,7 @@ class VipCarsScraper {
 
     try {
       for (const location of this.config.locations) {
-        const outcome = await this.runSingleLocation(browser, location);
+        const outcome = await this.runLocationWithRetries(browser, location);
         if (outcome.ok) {
           results.push(...outcome.results);
           console.log(`OK  ${location} -> ${outcome.cheapest.provider} -> ${formatMoney(outcome.cheapest.total_price, outcome.cheapest.currency)}`);
@@ -37,6 +39,16 @@ class VipCarsScraper {
     }
 
     return { results, failures };
+  }
+
+  async runLocationWithRetries(browser, location) {
+    for (let retryCount = 0; retryCount <= MAX_TIMEOUT_RETRIES; retryCount += 1) {
+      const outcome = await this.runSingleLocation(browser, location);
+      if (outcome.ok || !isTimeoutError(outcome.error) || retryCount === MAX_TIMEOUT_RETRIES) {
+        return outcome;
+      }
+      console.log(`RETRY ${location} -> timeout; retry ${retryCount + 1}/${MAX_TIMEOUT_RETRIES}`);
+    }
   }
 
   async runSingleLocation(browser, location) {
@@ -386,6 +398,13 @@ function isAutomaticTransmissionCandidate(candidate) {
   }
   const text = `${candidate?.transmission || ""} ${candidate?.carName || ""}`;
   return /\bautomatic\b/i.test(text);
+}
+
+function isTimeoutError(error) {
+  if (error?.name === "TimeoutError") {
+    return true;
+  }
+  return /\btimeout\b.*\bexceeded\b|\btimed out\b/i.test(String(error?.message || error || ""));
 }
 
 function slugifyLocation(value) {

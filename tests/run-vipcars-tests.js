@@ -25,6 +25,17 @@ function runTest(name, fn) {
   }
 }
 
+async function runAsyncTest(name, fn) {
+  try {
+    await fn();
+    console.log(`PASS ${name}`);
+  } catch (error) {
+    console.error(`FAIL ${name}`);
+    console.error(error instanceof Error ? error.stack : String(error));
+    process.exitCode = 1;
+  }
+}
+
 runTest("loadConfig accepts CLI locations and dates", () => {
   const config = loadConfig([
     "--location", "Warsaw",
@@ -420,6 +431,29 @@ runTest("HTML report applies all MM highlight colors", () => {
   assert.match(html, /2\.5 EUR\/day/);
 });
 
-if (!process.exitCode) {
-  console.log("All VipCars tests passed.");
-}
+runAsyncTest("VipCars retries timeouts at most twice", async () => {
+  const timeoutScraper = new VipCarsScraper({});
+  let timeoutAttempts = 0;
+  timeoutScraper.runSingleLocation = async () => {
+    timeoutAttempts += 1;
+    return { ok: false, error: new Error("page.waitForSelector: Timeout 45000ms exceeded.") };
+  };
+
+  const timeoutOutcome = await timeoutScraper.runLocationWithRetries({}, "Warsaw");
+  assert.equal(timeoutOutcome.ok, false);
+  assert.equal(timeoutAttempts, 3);
+
+  const nonTimeoutScraper = new VipCarsScraper({});
+  let nonTimeoutAttempts = 0;
+  nonTimeoutScraper.runSingleLocation = async () => {
+    nonTimeoutAttempts += 1;
+    return { ok: false, error: new Error("No automatic-transmission VipCars search result cards were found.") };
+  };
+
+  await nonTimeoutScraper.runLocationWithRetries({}, "Warsaw");
+  assert.equal(nonTimeoutAttempts, 1);
+}).then(() => {
+  if (!process.exitCode) {
+    console.log("All VipCars tests passed.");
+  }
+});
