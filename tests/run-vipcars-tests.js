@@ -247,6 +247,15 @@ runTest("CSV and HTML report render top offers", () => {
   assert.match(html, /Thrifty/);
   assert.match(html, /26\.13 EUR\/day/);
   assert.doesNotMatch(html, /52\.26 EUR/);
+  assert.match(html, /Scenariusze: 1 \| sprawdzenia lokalizacji: 1 \| brak MM Cars Rental: 1/);
+  assert.match(html, /id="filter-date"/);
+  assert.match(html, /id="filter-location"/);
+  assert.match(html, /id="filter-duration"/);
+  assert.match(html, /id="filter-state"/);
+  assert.match(html, /data-mm-state="missing"/);
+  assert.match(html, /Tylko automaty/);
+  assert.match(html, /Pozycja MM/);
+  assert.match(html, /@media \(max-width: 1200px\)/);
 
   const fallbackHtml = buildHtmlReport([{
     location: "Krakow",
@@ -425,10 +434,45 @@ runTest("HTML report applies all MM highlight colors", () => {
   assert.match(html, /mm mm-close/);
   assert.match(html, /badge close/);
   assert.match(html, /badge good/);
-  assert.match(html, /top4_rate_per_day/);
+  assert.match(html, /Top 4 EUR\/d/);
+  assert.match(html, /MM EUR\/d/);
+  assert.match(html, /Tańsze oferty/);
+  assert.match(html, /data-mm-state="top1-gap"/);
+  assert.match(html, /data-mm-state="close"/);
+  assert.match(html, /MM close: 3 \| MM top1 gap: 1/);
   assert.match(html, /\.mm-close \{ background: var\(--red-bg\)/);
   assert.match(html, /\.mm-top1-gap \{ background: var\(--blue-bg\)/);
   assert.match(html, /2\.5 EUR\/day/);
+});
+
+runTest("HTML report keeps Top4 and calculates MM metrics outside Top4", () => {
+  const offers = [10, 11, 12, 13, 14].map((pricePerDay, index) => ({
+    location: "Warsaw",
+    duration_days: "2",
+    pickup_date: "2026-05-15",
+    dropoff_date: "2026-05-17",
+    provider: `Competitor ${index + 1}`,
+    provider_rating: "",
+    price_per_day: String(pricePerDay),
+    currency: "EUR"
+  }));
+  offers.push({
+    location: "Warsaw",
+    duration_days: "2",
+    pickup_date: "2026-05-15",
+    dropoff_date: "2026-05-17",
+    provider: "MM Cars Rental",
+    provider_rating: "",
+    price_per_day: "15",
+    currency: "EUR"
+  });
+
+  const html = buildHtmlReport(offers, "2026-05-15T00:00:00.000Z");
+  assert.match(html, /Competitor 4/);
+  assert.doesNotMatch(html, /Competitor 5/);
+  assert.match(html, /<td class="mm mm-close">15\.00 EUR\/day<\/td>/);
+  assert.match(html, /<td class="rank-cell">Top 6<\/td>/);
+  assert.match(html, /<td class="count-cell">5<\/td>/);
 });
 
 runAsyncTest("VipCars retries timeouts at most twice", async () => {
