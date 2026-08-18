@@ -20,7 +20,7 @@ https://prejsik.github.io/VipCars-tool/report.html
 
 ## Scheduled scenarios
 
-The daily schedule checks 30 rolling pickup dates from the run date and rental durations from 2 to 10 days.
+The daily schedule checks 60 rolling pickup dates from the run date and rental durations from 2 to 10 days.
 
 ## Telegram notification
 
