@@ -32,7 +32,7 @@ on:
       durations:
         description: "Comma-separated rental durations in days"
         required: true
-        default: "2,3,4"
+        default: "2,3,4,5,6,7,8,9,10,11,12,13,14"
       currency:
         description: "VipCars display currency"
         required: true
@@ -47,14 +47,14 @@ env:
   SCHEDULE_LOCATIONS: "Warsaw,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
   SCHEDULE_PICKUP_WEEKDAYS: ""
   SCHEDULE_PICKUP_ROLLING_DAYS: "60"
-  SCHEDULE_DURATIONS: "2,3,4"
+  SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10,11,12,13,14"
   SCHEDULE_CURRENCY: "EUR"
   PUSH_TEST_LOCATIONS: "Warsaw"
   PUSH_TEST_PICKUP_WEEKDAYS: "friday"
   PUSH_TEST_PICKUP_ROLLING_DAYS: ""
   PUSH_TEST_DURATIONS: "2"
   PUSH_TEST_CURRENCY: "EUR"
-  SCHEDULE_CHUNK_COUNT: "15"
+  SCHEDULE_CHUNK_COUNT: "30"
 
 jobs:
   prepare:
@@ -179,7 +179,7 @@ jobs:
       - test
     if: needs.prepare.outputs.should_run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare.outputs.chunk_matrix) }}
