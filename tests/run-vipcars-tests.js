@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -314,6 +315,70 @@ runTest("mergeCsvFiles combines chunk result files", () => {
   assert.equal(summary.rowCount, 2);
   assert.equal(mergedRows.length, 2);
   assert.deepEqual(mergedRows.map((row) => row.location), ["Warsaw", "Krakow"]);
+});
+
+runTest("Telegram alert lists only attempted pickup dates without MM Cars Rental", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "vipcars-telegram-alert-"));
+  const csvPath = path.join(tempDir, "vipcars-results.csv");
+  const logPath = path.join(tempDir, "vipcars-run-log.txt");
+  const alertScriptPath = path.join(__dirname, "..", "src", "vipcars", "telegramAlert.js");
+
+  fs.writeFileSync(csvPath, toCsv([
+    {
+      location: "Warsaw",
+      duration_days: 2,
+      pickup_date: "2026-09-01",
+      dropoff_date: "2026-09-03",
+      provider: "Thrifty",
+      price_per_day: 26,
+      currency: "EUR"
+    },
+    {
+      location: "Katowice",
+      duration_days: 5,
+      pickup_date: "2026-09-02",
+      dropoff_date: "2026-09-07",
+      provider: "MM Cars Rental",
+      price_per_day: 31,
+      currency: "EUR"
+    }
+  ]), "utf8");
+  fs.writeFileSync(logPath, [
+    "Scenario: 2026-09-01 -> 2026-09-03 (2 days)",
+    "Scenario: 2026-09-02 -> 2026-09-04 (2 days)",
+    "Scenario: 2026-09-03 -> 2026-09-05 (2 days)"
+  ].join("\n"), "utf8");
+
+  const result = spawnSync(process.execPath, [alertScriptPath, csvPath, logPath], {
+    cwd: path.join(__dirname, ".."),
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), [
+    "ALERT MM CARS RENTAL",
+    "MM Cars Rental nie jest widoczny nigdzie dla start date:",
+    "- 2026-09-01",
+    "- 2026-09-03"
+  ].join("\n"));
+  assert.doesNotMatch(result.stdout, /2026-09-02/);
+
+  fs.writeFileSync(csvPath, toCsv([{
+    location: "Warsaw",
+    duration_days: 2,
+    pickup_date: "2026-09-04",
+    dropoff_date: "2026-09-06",
+    provider: "mm cars rental",
+    price_per_day: 30,
+    currency: "EUR"
+  }]), "utf8");
+  fs.writeFileSync(logPath, "Scenario: 2026-09-04 -> 2026-09-06 (2 days)\n", "utf8");
+
+  const noAlertResult = spawnSync(process.execPath, [alertScriptPath, csvPath, logPath], {
+    cwd: path.join(__dirname, ".."),
+    encoding: "utf8"
+  });
+  assert.equal(noAlertResult.status, 0, noAlertResult.stderr);
+  assert.equal(noAlertResult.stdout, "");
 });
 
 runTest("HTML report applies all MM highlight colors", () => {

@@ -33,3 +33,4 @@ TELEGRAM_CHAT_IDS
 
 `TELEGRAM_CHAT_IDS` can contain one chat ID or several IDs separated with commas, for example `123456789,987654321`.
 The older single-recipient `TELEGRAM_CHAT_ID` secret is still supported as a fallback.
+The message also lists every attempted pickup date where MM Cars Rental is not visible in any scraped location or rental duration.

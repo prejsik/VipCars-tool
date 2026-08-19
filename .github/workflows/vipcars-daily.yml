@@ -358,7 +358,13 @@ jobs:
             status_text="czesciowy; jeden z chunkow wymaga sprawdzenia (${SCRAPE_RESULT})"
           fi
 
-          message=$(printf 'VipCars: raport HTML jest %s.\n\nZakres:\n- chunki: %s\n- lokalizacje: %s\n- rolling days: %s\n- durations: %s\n- waluta: %s\n\nRaport HTML:\n%sreport.html\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$status_text" "$CHUNK_TOTAL" "$LOCATIONS" "$PICKUP_ROLLING_DAYS" "$DURATIONS" "$CURRENCY" "$PAGE_URL" "$ARTIFACT_URL" "$RUN_URL")
+          mm_alert="$(node src/vipcars/telegramAlert.js output/vipcars-results.csv output/vipcars-run-log.txt)"
+          alert_section=""
+          if [[ -n "$mm_alert" ]]; then
+            alert_section=$(printf '\n\n%s' "$mm_alert")
+          fi
+
+          message=$(printf 'VipCars: raport HTML jest %s.\n\nZakres:\n- chunki: %s\n- lokalizacje: %s\n- rolling days: %s\n- durations: %s\n- waluta: %s%s\n\nRaport HTML:\n%sreport.html\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$status_text" "$CHUNK_TOTAL" "$LOCATIONS" "$PICKUP_ROLLING_DAYS" "$DURATIONS" "$CURRENCY" "$alert_section" "$PAGE_URL" "$ARTIFACT_URL" "$RUN_URL")
 
           # TELEGRAM_CHAT_IDS can contain one or more comma-separated private chats, groups, or channels.
           IFS=',' read -ra recipients <<< "$chat_ids"
