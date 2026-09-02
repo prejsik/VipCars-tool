@@ -296,12 +296,21 @@ function reportSummary(scenarios) {
   };
 }
 
-function buildHtmlReport(rows, generatedAt = new Date().toISOString()) {
+function buildHtmlReport(rows, generatedAt = new Date().toISOString(), coverageRows = []) {
   const scenarios = groupByScenario(rows).map((scenario) => ({
     ...scenario,
     locations: groupLocationOffers(scenario.rows)
   }));
   const summary = reportSummary(scenarios);
+  const incompleteCoverageCount = coverageRows.filter((row) => row.status !== "complete").length;
+  const coverageWithOffersCount = coverageRows.filter((row) => row.status === "complete" && Number(row.result_count) > 0).length;
+  const coverageWithoutOffersCount = coverageRows.filter((row) => row.status === "complete" && Number(row.result_count) === 0).length;
+  const coverageSummary = coverageRows.length
+    ? ` | kontrole planowane: ${coverageRows.length} | z ofertami: ${coverageWithOffersCount} | bez ofert: ${coverageWithoutOffersCount} | niepełne: ${incompleteCoverageCount}`
+    : "";
+  const coverageWarning = incompleteCoverageCount
+    ? `<div class="coverage-warning">Raport częściowy: ${incompleteCoverageCount} z ${coverageRows.length} kontroli nie ma kompletnych danych.</div>`
+    : "";
   const locations = uniqueValues(rows.map((row) => row.location || "Unknown"), (left, right) => left.localeCompare(right));
   const durations = uniqueValues(rows.map((row) => row.duration_days), (left, right) => Number(left) - Number(right));
   const locationFilter = buildMultiFilter("filter-location", "Lokalizacja", locations.map((location) => ({ value: location, text: location })));
@@ -345,6 +354,7 @@ function buildHtmlReport(rows, generatedAt = new Date().toISOString()) {
     h1 { margin: 0 0 6px; font-size: 22px; font-weight: 700; }
     .meta { color: var(--muted); margin-bottom: 24px; font-size: 13px; }
     .summary { color: var(--muted); margin-bottom: 14px; font-size: 13px; }
+    .coverage-warning { color: #ffffff; background: #8f1d1d; border: 1px solid #e05a5a; padding: 8px 10px; margin-bottom: 14px; font-size: 13px; }
     .scenario { margin: 0 0 34px; padding-top: 8px; border-top: 2px solid #2d333b; overflow-x: visible; }
     h2 { margin: 0 0 4px; font-size: 16px; font-weight: 700; }
     .period { color: var(--text); margin-bottom: 8px; font-size: 14px; }
@@ -474,7 +484,8 @@ function buildHtmlReport(rows, generatedAt = new Date().toISOString()) {
 <body>
   <h1>VipCars report</h1>
   <div class="meta">Generated at: ${escapeHtml(generatedAt)} | Time zone: Europe/Warsaw | Source: https://www.vipcars.com</div>
-  <div class="summary">Scenariusze: ${summary.scenarioCount} | sprawdzenia lokalizacji: ${summary.locationCheckCount} | brak MM Cars Rental: ${summary.missingMmCount} | MM close: ${summary.closeMmCount} | MM top1 gap: ${summary.top1GapCount}</div>
+  <div class="summary">Scenariusze: ${summary.scenarioCount} | sprawdzenia lokalizacji: ${summary.locationCheckCount} | brak MM Cars Rental: ${summary.missingMmCount} | MM close: ${summary.closeMmCount} | MM top1 gap: ${summary.top1GapCount}${coverageSummary}</div>
+  ${coverageWarning}
   <div class="legend">
     <span><span class="badge">MM Cars Rental</span> MM Cars Rental in table</span>
     <span><span class="badge close">MM close</span> MM up to 2.5 EUR/day above the previous competitor</span>
@@ -538,18 +549,22 @@ function buildHtmlReport(rows, generatedAt = new Date().toISOString()) {
 </html>`;
 }
 
-function generateReportFromFile(inputPath, outputPath) {
+function generateReportFromFile(inputPath, outputPath, coveragePath) {
   const rows = parseCsv(fs.readFileSync(inputPath, "utf8"));
+  const coverageRows = coveragePath && fs.existsSync(coveragePath)
+    ? parseCsv(fs.readFileSync(coveragePath, "utf8"))
+    : [];
   const targetPath = path.resolve(outputPath);
   fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-  fs.writeFileSync(targetPath, buildHtmlReport(rows), "utf8");
+  fs.writeFileSync(targetPath, buildHtmlReport(rows, new Date().toISOString(), coverageRows), "utf8");
   return targetPath;
 }
 
 if (require.main === module) {
   const inputPath = process.argv[2] || "output/vipcars-results.csv";
   const outputPath = process.argv[3] || "output/vipcars-report.html";
-  console.log(`VipCars HTML report saved to ${generateReportFromFile(inputPath, outputPath)}`);
+  const coveragePath = process.argv[4] || "output/vipcars-coverage.csv";
+  console.log(`VipCars HTML report saved to ${generateReportFromFile(inputPath, outputPath, coveragePath)}`);
 }
 
 module.exports = { buildHtmlReport, generateReportFromFile, parseCsv };

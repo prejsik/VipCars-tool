@@ -28,7 +28,7 @@ on:
       pickup_rolling_days:
         description: "Number of consecutive pickup dates from today"
         required: false
-        default: "30"
+        default: "60"
       durations:
         description: "Comma-separated rental durations in days"
         required: true
@@ -71,15 +71,17 @@ jobs:
       chunk_matrix: ${{ steps.options.outputs.chunk_matrix }}
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Check Warsaw schedule gate
         id: gate
         shell: bash
         run: |
           warsaw_now="$(TZ=Europe/Warsaw date '+%Y-%m-%d %H:%M:%S %Z')"
-          warsaw_offset="$(TZ=Europe/Warsaw date +%z)"
+          warsaw_date="$(TZ=Europe/Warsaw date +%F)"
           trigger_schedule="${{ github.event.schedule }}"
           echo "Warsaw time now: $warsaw_now"
-          echo "Warsaw UTC offset: $warsaw_offset"
           echo "Schedule trigger: ${trigger_schedule:-not-scheduled}"
 
           if [[ "${{ github.event_name }}" != "schedule" ]]; then
@@ -87,10 +89,9 @@ jobs:
             exit 0
           fi
 
-          # Use the cron expression instead of runner start hour because GitHub can delay scheduled jobs.
-          if [[ "$warsaw_offset" == "+0200" && "$trigger_schedule" == "30 0 * * *" ]]; then
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-          elif [[ "$warsaw_offset" == "+0100" && "$trigger_schedule" == "30 1 * * *" ]]; then
+          selected_schedule="$(node src/vipcars/scheduleGate.js "$warsaw_date")"
+          echo "Selected schedule for $warsaw_date: $selected_schedule"
+          if [[ "$trigger_schedule" == "$selected_schedule" ]]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_run=false" >> "$GITHUB_OUTPUT"
@@ -221,7 +222,8 @@ jobs:
             --currency "$CURRENCY" \
             --timeout-ms 45000 \
             --artifacts-dir "artifacts/vipcars/chunk-${CHUNK_INDEX}" \
-            --output-csv "output/vipcars-results-chunk-${CHUNK_INDEX}.csv")
+            --output-csv "output/vipcars-results-chunk-${CHUNK_INDEX}.csv" \
+            --output-coverage "output/vipcars-coverage-chunk-${CHUNK_INDEX}.csv")
 
           if [[ -n "$PICKUP_ROLLING_DAYS" ]]; then
             command+=(--pickup-rolling-days "$PICKUP_ROLLING_DAYS")
@@ -244,6 +246,7 @@ jobs:
           name: vipcars-results-chunk-${{ matrix.chunk }}-${{ github.run_number }}
           path: |
             output/vipcars-results-chunk-${{ matrix.chunk }}.csv
+            output/vipcars-coverage-chunk-${{ matrix.chunk }}.csv
             output/vipcars-run-log-chunk-${{ matrix.chunk }}.txt
             output/vipcars-run-error-chunk-${{ matrix.chunk }}.txt
             artifacts/vipcars/chunk-${{ matrix.chunk }}/**
@@ -283,12 +286,13 @@ jobs:
         run: |
           mkdir -p output
           node src/vipcars/mergeCsv.js chunk-artifacts output/vipcars-results.csv
+          node src/vipcars/coverage.js chunk-artifacts output/vipcars-coverage.csv
           find chunk-artifacts -type f -name 'vipcars-run-log-chunk-*.txt' -exec cat {} + > output/vipcars-run-log.txt || true
           find chunk-artifacts -type f -name 'vipcars-run-error-chunk-*.txt' -exec cat {} + > output/vipcars-run-error.txt || true
 
       - name: Generate VipCars HTML report
         shell: bash
-        run: node src/vipcars/reportHtml.js output/vipcars-results.csv output/vipcars-report.html
+        run: node src/vipcars/reportHtml.js output/vipcars-results.csv output/vipcars-report.html output/vipcars-coverage.csv
 
       - name: Prepare GitHub Pages site
         if: hashFiles('output/vipcars-report.html') != ''
@@ -297,6 +301,7 @@ jobs:
           cp output/vipcars-report.html public/index.html
           cp output/vipcars-report.html public/report.html
           cp output/vipcars-results.csv public/vipcars-results.csv
+          cp output/vipcars-coverage.csv public/vipcars-coverage.csv
           cp output/vipcars-run-log.txt public/vipcars-run-log.txt || true
           cp output/vipcars-run-error.txt public/vipcars-run-error.txt || true
 
@@ -323,6 +328,7 @@ jobs:
           name: vipcars-results-${{ github.run_number }}
           path: |
             output/vipcars-results.csv
+            output/vipcars-coverage.csv
             output/vipcars-report.html
             output/vipcars-run-log.txt
             output/vipcars-run-error.txt
@@ -358,7 +364,7 @@ jobs:
             status_text="czesciowy; jeden z chunkow wymaga sprawdzenia (${SCRAPE_RESULT})"
           fi
 
-          mm_alert="$(node src/vipcars/telegramAlert.js output/vipcars-results.csv output/vipcars-run-log.txt)"
+          mm_alert="$(node src/vipcars/telegramAlert.js output/vipcars-results.csv output/vipcars-coverage.csv)"
           alert_section=""
           if [[ -n "$mm_alert" ]]; then
             alert_section=$(printf '\n\n%s' "$mm_alert")

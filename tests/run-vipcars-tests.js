@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const { loadConfig } = require("../src/vipcars/config");
+const { mergeCoverageFiles } = require("../src/vipcars/coverage");
 const { mergeCsvFiles } = require("../src/vipcars/mergeCsv");
 const { parseMoney, toCsv } = require("../src/vipcars/utils");
 const { buildHtmlReport, parseCsv } = require("../src/vipcars/reportHtml");
@@ -317,10 +318,37 @@ runTest("mergeCsvFiles combines chunk result files", () => {
   assert.deepEqual(mergedRows.map((row) => row.location), ["Warsaw", "Krakow"]);
 });
 
+runTest("mergeCoverageFiles combines chunk coverage", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "vipcars-coverage-merge-"));
+  const chunkOne = path.join(tempDir, "chunk-1");
+  const chunkTwo = path.join(tempDir, "chunk-2");
+  fs.mkdirSync(chunkOne);
+  fs.mkdirSync(chunkTwo);
+  const header = "location,duration_days,pickup_date,dropoff_date,status,result_count,error";
+  fs.writeFileSync(path.join(chunkOne, "vipcars-coverage-chunk-1.csv"), [
+    header,
+    "Warsaw,2,2026-09-01,2026-09-03,complete,4,"
+  ].join("\n"), "utf8");
+  fs.writeFileSync(path.join(chunkTwo, "vipcars-coverage-chunk-2.csv"), [
+    header,
+    "Krakow,2,2026-09-02,2026-09-04,incomplete,0,timeout"
+  ].join("\n"), "utf8");
+
+  const outputPath = path.join(tempDir, "vipcars-coverage.csv");
+  const summary = mergeCoverageFiles(tempDir, outputPath);
+  const rows = parseCsv(fs.readFileSync(outputPath, "utf8"));
+  assert.equal(summary.files.length, 2);
+  assert.equal(summary.rowCount, 2);
+  assert.deepEqual(rows.map((row) => [row.location, row.status, row.result_count]), [
+    ["Warsaw", "complete", "4"],
+    ["Krakow", "incomplete", "0"]
+  ]);
+});
+
 runTest("Telegram alert lists only attempted pickup dates without MM Cars Rental", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "vipcars-telegram-alert-"));
   const csvPath = path.join(tempDir, "vipcars-results.csv");
-  const logPath = path.join(tempDir, "vipcars-run-log.txt");
+  const coveragePath = path.join(tempDir, "vipcars-coverage.csv");
   const alertScriptPath = path.join(__dirname, "..", "src", "vipcars", "telegramAlert.js");
 
   fs.writeFileSync(csvPath, toCsv([
@@ -343,21 +371,25 @@ runTest("Telegram alert lists only attempted pickup dates without MM Cars Rental
       currency: "EUR"
     }
   ]), "utf8");
-  fs.writeFileSync(logPath, [
-    "Scenario: 2026-09-01 -> 2026-09-03 (2 days)",
-    "Scenario: 2026-09-02 -> 2026-09-04 (2 days)",
-    "Scenario: 2026-09-03 -> 2026-09-05 (2 days)"
+  fs.writeFileSync(coveragePath, [
+    "location,duration_days,pickup_date,dropoff_date,status,error",
+    "Warsaw,2,2026-09-01,2026-09-03,complete,",
+    "Krakow,2,2026-09-01,2026-09-03,complete,",
+    "Katowice,5,2026-09-02,2026-09-07,complete,",
+    "Warsaw,2,2026-09-03,2026-09-05,incomplete,timeout"
   ].join("\n"), "utf8");
 
-  const result = spawnSync(process.execPath, [alertScriptPath, csvPath, logPath], {
+  const result = spawnSync(process.execPath, [alertScriptPath, csvPath, coveragePath], {
     cwd: path.join(__dirname, ".."),
     encoding: "utf8"
   });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), [
     "ALERT MM CARS RENTAL",
-    "MM Cars Rental nie jest widoczny nigdzie dla start date:",
+    "Brak MM - pełne dane:",
     "- 2026-09-01",
+    "",
+    "Nie można potwierdzić - niepełne dane:",
     "- 2026-09-03"
   ].join("\n"));
   assert.doesNotMatch(result.stdout, /2026-09-02/);
@@ -371,14 +403,69 @@ runTest("Telegram alert lists only attempted pickup dates without MM Cars Rental
     price_per_day: 30,
     currency: "EUR"
   }]), "utf8");
-  fs.writeFileSync(logPath, "Scenario: 2026-09-04 -> 2026-09-06 (2 days)\n", "utf8");
+  fs.writeFileSync(coveragePath, [
+    "location,duration_days,pickup_date,dropoff_date,status,error",
+    "Warsaw,2,2026-09-04,2026-09-06,complete,"
+  ].join("\n"), "utf8");
 
-  const noAlertResult = spawnSync(process.execPath, [alertScriptPath, csvPath, logPath], {
+  const noAlertResult = spawnSync(process.execPath, [alertScriptPath, csvPath, coveragePath], {
     cwd: path.join(__dirname, ".."),
     encoding: "utf8"
   });
   assert.equal(noAlertResult.status, 0, noAlertResult.stderr);
   assert.equal(noAlertResult.stdout, "");
+});
+
+runTest("coverage plan records every planned location check", () => {
+  const { applyScenarioChecks, createCoveragePlan } = require("../src/vipcars/coverage");
+  const coverage = createCoveragePlan({
+    pickupDateOptions: ["2026-09-01"],
+    durationDays: [2, 3],
+    locations: ["Warsaw", "Krakow"]
+  });
+
+  assert.equal(coverage.length, 4);
+  assert.deepEqual(coverage.map((row) => [row.status, row.result_count]), [
+    ["pending", 0],
+    ["pending", 0],
+    ["pending", 0],
+    ["pending", 0]
+  ]);
+
+  applyScenarioChecks(coverage, "2026-09-01", 2, [
+    { location: "Warsaw", status: "complete", resultCount: 3 },
+    { location: "Krakow", status: "incomplete", error: "timeout" }
+  ]);
+  assert.deepEqual(coverage.slice(0, 2).map((row) => [row.location, row.status, row.result_count]), [
+    ["Warsaw", "complete", 3],
+    ["Krakow", "incomplete", 0]
+  ]);
+});
+
+runTest("HTML report marks incomplete coverage", () => {
+  const html = buildHtmlReport([{
+    location: "Warsaw",
+    duration_days: "2",
+    pickup_date: "2026-09-01",
+    dropoff_date: "2026-09-03",
+    provider: "Thrifty",
+    price_per_day: "25",
+    currency: "EUR"
+  }], "2026-09-01T00:00:00.000Z", [
+    { location: "Warsaw", duration_days: "2", pickup_date: "2026-09-01", status: "complete", result_count: "1" },
+    { location: "Krakow", duration_days: "2", pickup_date: "2026-09-01", status: "incomplete", result_count: "0" }
+  ]);
+
+  assert.match(html, /Raport częściowy: 1 z 2 kontroli nie ma kompletnych danych/);
+  assert.match(html, /kontrole planowane: 2 \| z ofertami: 1 \| bez ofert: 0 \| niepełne: 1/);
+});
+
+runTest("schedule gate selects exactly one cron on DST transition dates", () => {
+  const { selectScheduleForWarsawDate } = require("../src/vipcars/scheduleGate");
+  assert.equal(selectScheduleForWarsawDate("2026-01-15"), "30 1 * * *");
+  assert.equal(selectScheduleForWarsawDate("2026-07-15"), "30 0 * * *");
+  assert.equal(selectScheduleForWarsawDate("2026-03-29"), "30 1 * * *");
+  assert.equal(selectScheduleForWarsawDate("2026-10-25"), "30 1 * * *");
 });
 
 runTest("HTML report applies all MM highlight colors", () => {
@@ -538,6 +625,31 @@ runTest("HTML report keeps Top4 and calculates MM metrics outside Top4", () => {
   assert.match(html, /<td class="mm mm-close">15\.00 EUR\/day<\/td>/);
   assert.match(html, /<td class="rank-cell">Top 6<\/td>/);
   assert.match(html, /<td class="count-cell">5<\/td>/);
+});
+
+runAsyncTest("VipCars loads beyond the first four providers", async () => {
+  const scraper = new VipCarsScraper({ maxProvidersPerLocation: 25, timeoutMs: 1000 });
+  const states = [
+    { cardCount: 4, automaticCardCount: 4, providerCount: 4, totalCount: 8 },
+    { cardCount: 8, automaticCardCount: 8, providerCount: 8, totalCount: 8 }
+  ];
+  let stateIndex = 0;
+  let scrollCount = 0;
+  const page = {
+    evaluate: async (callback) => {
+      if (String(callback).includes("window.scrollTo")) {
+        scrollCount += 1;
+        return undefined;
+      }
+      const state = states[Math.min(stateIndex, states.length - 1)];
+      stateIndex += 1;
+      return state;
+    },
+    waitForFunction: async () => undefined
+  };
+
+  await scraper.loadSearchResultCards(page);
+  assert.equal(scrollCount, 1);
 });
 
 runAsyncTest("VipCars retries timeouts at most twice", async () => {

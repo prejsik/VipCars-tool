@@ -22,15 +22,22 @@ class VipCarsScraper {
     const browser = await chromium.launch({ headless: this.config.headless });
     const results = [];
     const failures = [];
+    const checks = [];
 
     try {
       for (const location of this.config.locations) {
         const outcome = await this.runLocationWithRetries(browser, location);
         if (outcome.ok) {
           results.push(...outcome.results);
-          console.log(`OK  ${location} -> ${outcome.cheapest.provider} -> ${formatMoney(outcome.cheapest.total_price, outcome.cheapest.currency)}`);
+          checks.push({ location, status: "complete", resultCount: outcome.results.length });
+          if (outcome.cheapest) {
+            console.log(`OK  ${location} -> ${outcome.cheapest.provider} -> ${formatMoney(outcome.cheapest.total_price, outcome.cheapest.currency)}`);
+          } else {
+            console.log(`NONE ${location} -> no automatic-transmission offers.`);
+          }
         } else {
           failures.push({ location, error: outcome.error.message });
+          checks.push({ location, status: "incomplete", resultCount: 0, error: outcome.error.message });
           console.log(`ERR ${location} -> ${outcome.error.message}`);
         }
       }
@@ -38,7 +45,7 @@ class VipCarsScraper {
       await browser.close();
     }
 
-    return { results, failures };
+    return { results, failures, checks };
   }
 
   async runLocationWithRetries(browser, location) {
@@ -83,7 +90,7 @@ class VipCarsScraper {
       await this.loadSearchResultCards(page);
       const offers = await this.extractSearchOffers(page, location);
       if (!offers.length) {
-        throw new Error("No automatic-transmission VipCars search result cards were found.");
+        return { ok: true, cheapest: null, results: [] };
       }
 
       const selected = selectBestOffersByProvider(offers, this.config.maxProvidersPerLocation);
@@ -138,7 +145,6 @@ class VipCarsScraper {
   }
 
   async loadSearchResultCards(page) {
-    const targetProviders = Math.max(1, Math.min(4, Number(this.config.maxProvidersPerLocation) || 4));
     let previousCardCount = 0;
     let stableRounds = 0;
 
@@ -171,11 +177,11 @@ class VipCarsScraper {
           cardCount: cards.length,
           automaticCardCount: automaticCards.length,
           providerCount: providers.size,
-          totalCount: Number.isFinite(totalCount) ? totalCount : cards.length
+          totalCount: Number.isFinite(totalCount) ? totalCount : null
         };
       });
 
-      if (state.providerCount >= targetProviders || state.cardCount >= state.totalCount) {
+      if (Number.isFinite(state.totalCount) && state.cardCount >= state.totalCount) {
         break;
       }
 
@@ -187,30 +193,11 @@ class VipCarsScraper {
 
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await page.waitForFunction(
-        ({ previousCount, desiredProviders }) => {
-          const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
-          const isAutomaticCard = (card) => {
-            const specsText = normalize(card.querySelector(".scv-car-specs")?.textContent || "");
-            const carName = normalize(
-              card.querySelector(".scv-car-name")?.textContent ||
-              card.querySelector(".scv-car-img img[alt]")?.getAttribute("alt") ||
-              ""
-            );
-            return Boolean(card.querySelector(".scv-car-specs .scv-icon.autom")) ||
-              /\bautomatic\b/i.test(`${specsText} ${carName}`);
-          };
+        ({ previousCount }) => {
           const cards = Array.from(document.querySelectorAll(".scv-car-box"));
-          const automaticCards = cards.filter(isAutomaticCard);
-          const providers = new Set(automaticCards
-            .map((card) => normalize(
-              card.querySelector(".scv-supp-info img[alt], img[id^='supplier_']")?.getAttribute("alt") ||
-              card.querySelector(".scv-supp-info h5")?.textContent ||
-              ""
-            ))
-            .filter(Boolean));
-          return cards.length > previousCount || providers.size >= desiredProviders;
+          return cards.length > previousCount;
         },
-        { previousCount: state.cardCount, desiredProviders: targetProviders },
+        { previousCount: state.cardCount },
         { timeout: Math.min(this.config.timeoutMs, 10000) }
       ).catch(() => {});
     }
@@ -316,7 +303,8 @@ class VipCarsScraper {
   }
 
   async captureFailureArtifacts(page, location) {
-    const baseName = safeFilePart(location) || "location";
+    const scenarioName = `${this.config.pickupDate}-${this.config.currentDurationDays}d-${location}`;
+    const baseName = safeFilePart(scenarioName) || "location";
     await page.screenshot({
       path: path.join(this.config.artifactsDir, `${baseName}.png`),
       fullPage: true

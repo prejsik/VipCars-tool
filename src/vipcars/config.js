@@ -271,6 +271,13 @@ function loadConfig(argv) {
       fileConfig["output-csv"] ||
       path.join("output", "vipcars-results.csv")
     ),
+    outputCoverage: path.resolve(
+      cli.outputCoverage ||
+      cli["output-coverage"] ||
+      fileConfig.outputCoverage ||
+      fileConfig["output-coverage"] ||
+      path.join("output", "vipcars-coverage.csv")
+    ),
     artifactsDir: path.resolve(
       cli.artifactsDir ||
       cli["artifacts-dir"] ||
@@ -302,6 +309,7 @@ Options:
   --pickup-weekdays "thursday,friday"
   --durations-days "2,3"
   --output-csv PATH
+  --output-coverage PATH
   --headed
   --help
 `);

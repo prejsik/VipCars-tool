@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const { loadConfig, printHelp } = require("./config");
+const { applyScenarioChecks, createCoveragePlan, toCoverageCsv } = require("./coverage");
 const { addDaysToIsoDate, toCsv, writeTextFile } = require("./utils");
 
 async function main() {
@@ -23,7 +24,9 @@ async function main() {
     const { VipCarsScraper } = require("./scraper");
     const allResults = [];
     const allFailures = [];
+    const coverageRows = createCoveragePlan(config);
     writeTextFile(config.outputCsv, toCsv(allResults));
+    writeTextFile(config.outputCoverage, toCoverageCsv(coverageRows));
 
     for (const pickupDate of config.pickupDateOptions) {
       for (const durationDays of config.durationDays) {
@@ -35,10 +38,12 @@ async function main() {
         };
         console.log(`Scenario: ${scenarioConfig.pickupDate} -> ${scenarioConfig.dropoffDate} (${durationDays} days)`);
         const scraper = new VipCarsScraper(scenarioConfig);
-        const { results, failures } = await scraper.run();
+        const { results, failures, checks } = await scraper.run();
         allResults.push(...results);
         allFailures.push(...failures.map((failure) => ({ ...failure, pickupDate, durationDays })));
+        applyScenarioChecks(coverageRows, pickupDate, durationDays, checks);
         writeTextFile(config.outputCsv, toCsv(allResults));
+        writeTextFile(config.outputCoverage, toCoverageCsv(coverageRows));
         console.log("");
       }
     }
@@ -46,8 +51,9 @@ async function main() {
     printSummary(allResults, allFailures);
     writeTextFile(config.outputCsv, toCsv(allResults));
     console.log(`CSV saved to: ${config.outputCsv}`);
+    console.log(`Coverage saved to: ${config.outputCoverage}`);
 
-    if (!allResults.length) {
+    if (allFailures.length) {
       process.exitCode = 1;
     }
   } catch (error) {

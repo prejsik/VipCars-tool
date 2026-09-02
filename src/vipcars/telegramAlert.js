@@ -3,62 +3,76 @@ const fs = require("node:fs");
 
 const { parseCsv } = require("./reportHtml");
 
-function parseAttemptedPickupDates(logContent) {
-  const dates = new Set();
-  const scenarioPattern = /^Scenario:\s*(\d{4}-\d{2}-\d{2})\s*->/gm;
-  let match = scenarioPattern.exec(String(logContent || ""));
-
-  while (match) {
-    dates.add(match[1]);
-    match = scenarioPattern.exec(String(logContent || ""));
-  }
-
-  return [...dates].sort();
-}
-
 function isMmCarsProvider(provider) {
   return String(provider || "").trim().toLowerCase().includes("mm cars rental");
 }
 
-function findStartDatesWithoutMm(rows, attemptedPickupDates) {
+function classifyStartDatesWithoutMm(rows, coverageRows) {
   const mmPickupDates = new Set(
     rows
       .filter((row) => isMmCarsProvider(row.provider))
       .map((row) => row.pickup_date)
       .filter(Boolean)
   );
-  const sourceDates = attemptedPickupDates.length
-    ? attemptedPickupDates
-    : rows.map((row) => row.pickup_date).filter(Boolean);
+  const coverageByDate = new Map();
+  for (const row of coverageRows) {
+    if (!row.pickup_date) {
+      continue;
+    }
+    if (!coverageByDate.has(row.pickup_date)) {
+      coverageByDate.set(row.pickup_date, []);
+    }
+    coverageByDate.get(row.pickup_date).push(row);
+  }
+  if (!coverageByDate.size) {
+    for (const row of rows) {
+      if (row.pickup_date && !coverageByDate.has(row.pickup_date)) {
+        coverageByDate.set(row.pickup_date, []);
+      }
+    }
+  }
 
-  return [...new Set(sourceDates)]
-    .filter((pickupDate) => !mmPickupDates.has(pickupDate))
-    .sort();
+  const confirmed = [];
+  const incomplete = [];
+  for (const [pickupDate, checks] of [...coverageByDate.entries()].sort()) {
+    if (mmPickupDates.has(pickupDate)) {
+      continue;
+    }
+    if (checks.length && checks.every((check) => check.status === "complete")) {
+      confirmed.push(pickupDate);
+    } else {
+      incomplete.push(pickupDate);
+    }
+  }
+  return { confirmed, incomplete };
 }
 
-function buildMissingMmStartDateAlert(rows, attemptedPickupDates) {
-  const missingDates = findStartDatesWithoutMm(rows, attemptedPickupDates);
-  if (!missingDates.length) {
+function buildMissingMmStartDateAlert(rows, coverageRows) {
+  const { confirmed, incomplete } = classifyStartDatesWithoutMm(rows, coverageRows);
+  if (!confirmed.length && !incomplete.length) {
     return "";
   }
 
-  return [
-    "ALERT MM CARS RENTAL",
-    "MM Cars Rental nie jest widoczny nigdzie dla start date:",
-    ...missingDates.map((pickupDate) => `- ${pickupDate}`)
-  ].join("\n");
+  const sections = ["ALERT MM CARS RENTAL"];
+  if (confirmed.length) {
+    sections.push(["Brak MM - pełne dane:", ...confirmed.map((pickupDate) => `- ${pickupDate}`)].join("\n"));
+  }
+  if (incomplete.length) {
+    sections.push(["Nie można potwierdzić - niepełne dane:", ...incomplete.map((pickupDate) => `- ${pickupDate}`)].join("\n"));
+  }
+  return `${sections[0]}\n${sections.slice(1).join("\n\n")}`;
 }
 
-function buildAlertFromFiles(csvPath, logPath) {
+function buildAlertFromFiles(csvPath, coveragePath) {
   const rows = parseCsv(fs.readFileSync(csvPath, "utf8"));
-  const logContent = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : "";
-  return buildMissingMmStartDateAlert(rows, parseAttemptedPickupDates(logContent));
+  const coverageRows = fs.existsSync(coveragePath) ? parseCsv(fs.readFileSync(coveragePath, "utf8")) : [];
+  return buildMissingMmStartDateAlert(rows, coverageRows);
 }
 
 if (require.main === module) {
   const csvPath = process.argv[2] || "output/vipcars-results.csv";
-  const logPath = process.argv[3] || "output/vipcars-run-log.txt";
-  const alert = buildAlertFromFiles(csvPath, logPath);
+  const coveragePath = process.argv[3] || "output/vipcars-coverage.csv";
+  const alert = buildAlertFromFiles(csvPath, coveragePath);
   if (alert) {
     process.stdout.write(`${alert}\n`);
   }
@@ -67,6 +81,5 @@ if (require.main === module) {
 module.exports = {
   buildAlertFromFiles,
   buildMissingMmStartDateAlert,
-  findStartDatesWithoutMm,
-  parseAttemptedPickupDates
+  classifyStartDatesWithoutMm
 };
