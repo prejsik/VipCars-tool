@@ -1,0 +1,38 @@
+{
+  "worksheet": "RateGroup Export",
+  "baseline_manifest_file": "input/vipcars-baseline-manifest.json",
+  "apply_groups": [
+    "CFAR",
+    "CFAR1",
+    "CFAR2",
+    "CWAR",
+    "CWAR1",
+    "CWAR2",
+    "CWAR3",
+    "EDAR",
+    "IDAR",
+    "IDAR1",
+    "IFAR",
+    "IFAR1",
+    "IFAR2",
+    "PDAR",
+    "PFAR"
+  ],
+  "rate_precision": 3,
+  "minimum_change_eur_day": 0.001,
+  "pricing": {
+    "threshold_eur_day": 2.5,
+    "undercut_eur_day": 0.25,
+    "min_broker_markup_multiplier": 1,
+    "max_broker_markup_multiplier": 1.25,
+    "min_adjustment_ratio": 0.7,
+    "max_adjustment_ratio": 1.6
+  },
+  "duration_bands": [
+    { "column": "I", "label": "1", "min_days": 1, "max_days": 1 },
+    { "column": "J", "label": "2", "min_days": 2, "max_days": 2 },
+    { "column": "K", "label": "3-4", "min_days": 3, "max_days": 4 },
+    { "column": "L", "label": "5-7", "min_days": 5, "max_days": 7 },
+    { "column": "M", "label": "8+", "min_days": 8, "max_days": 14, "update_enabled": false }
+  ]
+}

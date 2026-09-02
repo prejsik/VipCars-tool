@@ -8,7 +8,11 @@ on:
       - ".github/workflows/vipcars-daily.yml"
       - "src/vipcars/**"
       - "tests/**"
+      - "tools/update_vipcars_rates.py"
+      - "input/**"
       - "vipcars.config.example.json"
+      - "vipcars-rate-update.config.json"
+      - "requirements.txt"
       - "package.json"
       - "package-lock.json"
   schedule:
@@ -67,6 +71,7 @@ jobs:
       pickup_rolling_days: ${{ steps.options.outputs.pickup_rolling_days }}
       durations: ${{ steps.options.outputs.durations }}
       currency: ${{ steps.options.outputs.currency }}
+      pickup_count: ${{ steps.options.outputs.pickup_count }}
       chunk_total: ${{ steps.options.outputs.chunk_total }}
       chunk_matrix: ${{ steps.options.outputs.chunk_matrix }}
 
@@ -130,6 +135,17 @@ jobs:
           durations="${INPUT_DURATIONS:-$default_durations}"
           currency="${INPUT_CURRENCY:-$default_currency}"
 
+          plan_command=(node src/vipcars/pickupPlan.js \
+            --config vipcars.config.example.json \
+            --locations "$locations" \
+            --durations-days "$durations")
+          if [[ -n "$pickup_rolling_days" ]]; then
+            plan_command+=(--pickup-rolling-days "$pickup_rolling_days")
+          elif [[ -n "$pickup_weekdays" ]]; then
+            plan_command+=(--pickup-weekdays "$pickup_weekdays")
+          fi
+          pickup_count="$("${plan_command[@]}")"
+
           if ! [[ "$chunk_total" =~ ^[0-9]+$ ]] || [[ "$chunk_total" -lt 1 ]]; then
             chunk_total="1"
           fi
@@ -148,6 +164,7 @@ jobs:
           echo "pickup_rolling_days=$pickup_rolling_days" >> "$GITHUB_OUTPUT"
           echo "durations=$durations" >> "$GITHUB_OUTPUT"
           echo "currency=$currency" >> "$GITHUB_OUTPUT"
+          echo "pickup_count=$pickup_count" >> "$GITHUB_OUTPUT"
           echo "chunk_total=$chunk_total" >> "$GITHUB_OUTPUT"
           echo "chunk_matrix=$chunk_matrix" >> "$GITHUB_OUTPUT"
 
@@ -167,11 +184,19 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Install Node dependencies
         run: npm install
 
+      - name: Install Python dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
       - name: Run tests
-        run: npm test
+        run: npm run test:all
 
   scrape:
     name: Scrape VipCars chunk ${{ matrix.chunk }}/${{ needs.prepare.outputs.chunk_total }}
@@ -275,6 +300,14 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
       - name: Download VipCars chunk results
         uses: actions/download-artifact@v4
         with:
@@ -294,6 +327,40 @@ jobs:
         shell: bash
         run: node src/vipcars/reportHtml.js output/vipcars-results.csv output/vipcars-report.html output/vipcars-coverage.csv
 
+      - name: Generate VipCars pricing recommendations
+        id: pricing-recommendations
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_LOCATIONS: ${{ needs.prepare.outputs.locations }}
+          EXPECTED_DURATIONS: ${{ needs.prepare.outputs.durations }}
+          EXPECTED_PICKUP_COUNT: ${{ needs.prepare.outputs.pickup_count }}
+        run: |
+          command=(node src/vipcars/pricingRecommendations.js \
+            output/vipcars-results.csv \
+            output/vipcars-coverage.csv \
+            output/vipcars-pricing-recommendations.json \
+            --config=vipcars-rate-update.config.json \
+            --expected-locations="$EXPECTED_LOCATIONS" \
+            --expected-durations="$EXPECTED_DURATIONS")
+          if [[ -n "$EXPECTED_PICKUP_COUNT" ]]; then
+            command+=(--expected-pickup-count="$EXPECTED_PICKUP_COUNT")
+          fi
+          "${command[@]}"
+
+      - name: Generate VipCars recommendation and import workbooks
+        id: rate-workbooks
+        if: steps.pricing-recommendations.outcome == 'success'
+        continue-on-error: true
+        run: >-
+          python tools/update_vipcars_rates.py
+          --workbook input/vipcars-rate-group-export.xlsx
+          --recommendations output/vipcars-pricing-recommendations.json
+          --config vipcars-rate-update.config.json
+          --report-output output/vipcars-recommendations.xlsx
+          --import-output output/vipcars-rates-import-ready.xlsx
+          --summary-output output/vipcars-rate-update-summary.json
+
       - name: Prepare GitHub Pages site
         if: hashFiles('output/vipcars-report.html') != ''
         run: |
@@ -302,6 +369,15 @@ jobs:
           cp output/vipcars-report.html public/report.html
           cp output/vipcars-results.csv public/vipcars-results.csv
           cp output/vipcars-coverage.csv public/vipcars-coverage.csv
+          for optional_file in \
+            vipcars-pricing-recommendations.json \
+            vipcars-recommendations.xlsx \
+            vipcars-rates-import-ready.xlsx \
+            vipcars-rate-update-summary.json; do
+            if [[ -f "output/$optional_file" ]]; then
+              cp "output/$optional_file" "public/$optional_file"
+            fi
+          done
           cp output/vipcars-run-log.txt public/vipcars-run-log.txt || true
           cp output/vipcars-run-error.txt public/vipcars-run-error.txt || true
 
@@ -330,6 +406,10 @@ jobs:
             output/vipcars-results.csv
             output/vipcars-coverage.csv
             output/vipcars-report.html
+            output/vipcars-pricing-recommendations.json
+            output/vipcars-recommendations.xlsx
+            output/vipcars-rates-import-ready.xlsx
+            output/vipcars-rate-update-summary.json
             output/vipcars-run-log.txt
             output/vipcars-run-error.txt
             chunk-artifacts/**
@@ -352,6 +432,7 @@ jobs:
           PICKUP_ROLLING_DAYS: ${{ needs.prepare.outputs.pickup_rolling_days }}
           DURATIONS: ${{ needs.prepare.outputs.durations }}
           CURRENCY: ${{ needs.prepare.outputs.currency }}
+          RATE_WORKBOOK_STATUS: ${{ steps.rate-workbooks.outcome }}
         run: |
           chat_ids="${TELEGRAM_CHAT_IDS:-$TELEGRAM_CHAT_ID}"
           if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$chat_ids" ]]; then
@@ -370,7 +451,13 @@ jobs:
             alert_section=$(printf '\n\n%s' "$mm_alert")
           fi
 
-          message=$(printf 'VipCars: raport HTML jest %s.\n\nZakres:\n- chunki: %s\n- lokalizacje: %s\n- rolling days: %s\n- durations: %s\n- waluta: %s%s\n\nRaport HTML:\n%sreport.html\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$status_text" "$CHUNK_TOTAL" "$LOCATIONS" "$PICKUP_ROLLING_DAYS" "$DURATIONS" "$CURRENCY" "$alert_section" "$PAGE_URL" "$ARTIFACT_URL" "$RUN_URL")
+          if [[ "$RATE_WORKBOOK_STATUS" == "success" && -f output/vipcars-recommendations.xlsx && -f output/vipcars-rates-import-ready.xlsx ]]; then
+            rate_section=$(printf '\n\nRekomendacje XLSX:\n%svipcars-recommendations.xlsx\n\nImport XLSX:\n%svipcars-rates-import-ready.xlsx' "$PAGE_URL" "$PAGE_URL")
+          else
+            rate_section=$(printf '\n\nPliki stawek XLSX: pominiete, poniewaz coverage lub walidacja importu nie byly kompletne.')
+          fi
+
+          message=$(printf 'VipCars: raport HTML jest %s.\n\nZakres:\n- chunki: %s\n- lokalizacje: %s\n- rolling days: %s\n- durations: %s\n- waluta: %s%s\n\nRaport HTML:\n%sreport.html%s\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$status_text" "$CHUNK_TOTAL" "$LOCATIONS" "$PICKUP_ROLLING_DAYS" "$DURATIONS" "$CURRENCY" "$alert_section" "$PAGE_URL" "$rate_section" "$ARTIFACT_URL" "$RUN_URL")
 
           # TELEGRAM_CHAT_IDS can contain one or more comma-separated private chats, groups, or channels.
           IFS=',' read -ra recipients <<< "$chat_ids"

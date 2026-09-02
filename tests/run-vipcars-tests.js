@@ -175,6 +175,7 @@ runTest("CLI output paths override config defaults", () => {
 
 runTest("parseMoney handles VipCars price labels", () => {
   assert.deepEqual(parseMoney("EUR 26.13"), { value: 26.13, currency: "EUR", raw: "EUR 26.13" });
+  assert.deepEqual(parseMoney("Pay Now PLN 90.60"), { value: 90.6, currency: "PLN", raw: "Pay Now PLN 90.60" });
 });
 
 runTest("slugifyLocation builds VipCars landing slugs", () => {
@@ -239,6 +240,8 @@ runTest("CSV and HTML report render top offers", () => {
       provider_rating: "",
       total_price: 52.26,
       price_per_day: 26.13,
+      pay_now_amount: 4.32,
+      pay_now_currency: "EUR",
       currency: "EUR",
       source: "search"
     }
@@ -271,6 +274,33 @@ runTest("CSV and HTML report render top offers", () => {
     currency: "EUR"
   }], "2026-05-15T00:00:00.000Z");
   assert.match(fallbackHtml, /30\.00 EUR\/day/);
+});
+
+runAsyncTest("VipCars extracts Pay Now from the same offer card", async () => {
+  const scraper = new VipCarsScraper({
+    currency: "EUR",
+    currentDurationDays: 2,
+    pickupDate: "2026-09-04",
+    dropoffDate: "2026-09-06"
+  });
+  const page = {
+    evaluate: async () => [{
+      provider: "MM Cars Rental",
+      rating: "9.2",
+      priceText: "EUR 28.67",
+      payNowText: "Pay Now EUR 4.32",
+      location: "Warsaw",
+      carName: "Hyundai i30 Wagon Automatic",
+      transmission: "Automatic",
+      automatic: true
+    }]
+  };
+
+  const offers = await scraper.extractSearchOffers(page, "Warsaw");
+  assert.equal(offers.length, 1);
+  assert.equal(offers[0].pay_now_amount, 4.32);
+  assert.equal(offers[0].pay_now_currency, "EUR");
+  assert.match(toCsv(offers).split("\n")[0], /pay_now_amount,pay_now_currency/);
 });
 
 runTest("mergeCsvFiles combines chunk result files", () => {

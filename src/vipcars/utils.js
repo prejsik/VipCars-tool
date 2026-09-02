@@ -137,6 +137,8 @@ function toCsv(rows) {
     "provider_rating",
     "total_price",
     "price_per_day",
+    "pay_now_amount",
+    "pay_now_currency",
     "currency",
     "source"
   ];

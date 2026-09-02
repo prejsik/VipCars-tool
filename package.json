@@ -6,7 +6,11 @@
   "scripts": {
     "vipcars": "node src/vipcars/cli.js --config vipcars.config.example.json",
     "vipcars:report": "node src/vipcars/reportHtml.js output/vipcars-results.csv output/vipcars-report.html",
-    "test": "node tests/run-vipcars-tests.js"
+    "vipcars:recommendations": "node src/vipcars/pricingRecommendations.js output/vipcars-results.csv output/vipcars-coverage.csv output/vipcars-pricing-recommendations.json --config=vipcars-rate-update.config.json --run-config=vipcars.config.example.json",
+    "vipcars:rates": "python tools/update_vipcars_rates.py --workbook input/vipcars-rate-group-export.xlsx --recommendations output/vipcars-pricing-recommendations.json --config vipcars-rate-update.config.json --report-output output/vipcars-recommendations.xlsx --import-output output/vipcars-rates-import-ready.xlsx --summary-output output/vipcars-rate-update-summary.json",
+    "test": "node tests/run-vipcars-tests.js && node tests/run-vipcars-pricing-tests.js",
+    "test:excel": "python tests/run-vipcars-rate-updater-tests.py",
+    "test:all": "npm test && npm run test:excel"
   },
   "dependencies": {
     "playwright": "^1.52.0"

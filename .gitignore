@@ -5,3 +5,5 @@ artifacts/
 .env
 *.log
 *.tmp
+__pycache__/
+*.pyc

@@ -257,6 +257,7 @@ class VipCarsScraper {
           card.querySelector(".scv-car-price")?.textContent ||
           ""
         );
+        const payNowText = normalize(card.querySelector(".scv-pay-now")?.textContent || "");
         const carName = normalize(
           card.querySelector(".scv-car-name")?.textContent ||
           card.querySelector(".scv-car-img img[alt]")?.getAttribute("alt") ||
@@ -267,7 +268,7 @@ class VipCarsScraper {
           .find((text) => /transmission/i.test(text)) || "");
         const automatic = Boolean(card.querySelector(".scv-car-specs .scv-icon.autom")) ||
           /\bautomatic\b/i.test(`${transmission} ${carName}`);
-        return { provider, rating, priceText, location: defaultLocation, carName, transmission, automatic };
+        return { provider, rating, priceText, payNowText, location: defaultLocation, carName, transmission, automatic };
       });
     }, fallbackLocation);
 
@@ -283,6 +284,7 @@ class VipCarsScraper {
         continue;
       }
       const totalPrice = Number(money.value);
+      const payNow = parseMoney(candidate.payNowText);
       const durationDays = Number(this.config.currentDurationDays || 1);
       const pricePerDay = totalPrice / durationDays;
       offers.push({
@@ -294,6 +296,8 @@ class VipCarsScraper {
         provider_rating: candidate.rating,
         total_price: Number(totalPrice.toFixed(2)),
         price_per_day: Number(pricePerDay.toFixed(2)),
+        pay_now_amount: payNow ? Number(payNow.value.toFixed(2)) : "",
+        pay_now_currency: payNow ? normalizeCurrency(payNow.currency) : "",
         currency,
         source: "search"
       });
