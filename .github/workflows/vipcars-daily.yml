@@ -24,7 +24,7 @@ on:
       locations:
         description: "Comma-separated VipCars locations"
         required: true
-        default: "Warsaw,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
+        default: "Bydgoszcz,Warsaw,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
       pickup_weekdays:
         description: "Comma-separated pickup weekdays, used when pickup_rolling_days is empty"
         required: false
@@ -48,7 +48,7 @@ permissions:
   id-token: write
 
 env:
-  SCHEDULE_LOCATIONS: "Warsaw,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
+  SCHEDULE_LOCATIONS: "Bydgoszcz,Warsaw,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
   SCHEDULE_PICKUP_WEEKDAYS: ""
   SCHEDULE_PICKUP_ROLLING_DAYS: "60"
   SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10,11,12,13,14"

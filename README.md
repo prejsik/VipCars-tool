@@ -27,9 +27,11 @@ https://prejsik.github.io/VipCars-tool/vipcars-rates-import-ready.xlsx
 
 `vipcars-recommendations.xlsx` is the control workbook with changed positions, recommendation details, and validation. `vipcars-rates-import-ready.xlsx` keeps the original 13-column `RateGroup Export` layout and contains only the clean import sheet.
 
-The import is global because the VipCars source export has no location column. A duration band is changed only when all scheduled locations and all durations in that band have complete data. The most conservative allowed multiplier is applied proportionally to automatic-transmission rate groups; manual-transmission groups remain unchanged. Automatic updates of the open-ended `8+ per day` column are disabled because the scraper schedule covers only 8-14 days.
+The import is one global workbook divided by the `Rate zone` column. Rates are calculated independently for each configured zone, and a duration band is changed only when all durations in that band have complete data for that zone. Workbook generation requires a scrape covering every configured location, so a partial manual run cannot produce an import that overwrites untested zones. The most conservative allowed multiplier is applied proportionally to automatic-transmission rate groups; manual-transmission groups remain unchanged. Automatic updates of the open-ended `8+ per day` column are disabled because the scraper schedule covers only 8-14 days.
 
 For every MM Cars Rental offer, the scraper also reads the current `Pay Now` amount from the same result card. Recommendations subtract that amount from both the current site price and the target site price, then calculate the import adjustment from the resulting net daily rates. A recommendation is blocked when `Pay Now` is missing, invalid, uses a different currency, implies a broker multiplier outside `1.00-1.25`, or produces an import multiplier outside `0.70-1.60`. The observed amount and markup are shown in `Recommendations Review`; the clean 13-column import layout is unchanged.
+
+Recommendations and import rows are separated by the VipCars rate zones configured in `vipcars-rate-update.config.json`: `BYD`, `GDA`, `KAT`, `KRA`, `POZ`, `WAR`, and `WRO`. The generated import remains one `RateGroup Export` worksheet with the original 13 columns; the `Rate zone` column identifies the city-specific row. `Recommendations Review` shows the scraper location, zone code, zone name, and metroplex for every decision.
 
 ## Scheduled scenarios
 

@@ -14,6 +14,13 @@ const resultsPath = path.join(tempDir, "results.csv");
 const coveragePath = path.join(tempDir, "coverage.csv");
 const outputPath = path.join(tempDir, "recommendations.json");
 const scriptPath = path.join(__dirname, "..", "src", "vipcars", "pricingRecommendations.js");
+const configPath = path.join(tempDir, "rate-zones.json");
+const rateZones = [
+  { location: "Gdansk", code: "GDA", name: "GDANSK - AIRPORT", metroplex: "Main Metroplex" },
+  { location: "Krakow", code: "KRA", name: "KRAKOW - AIRPORT", metroplex: "Main Metroplex" },
+  { location: "Warsaw", code: "WAR", name: "WARSZAWA - AIRPORT", metroplex: "Main Metroplex" }
+];
+fs.writeFileSync(configPath, JSON.stringify({ rate_zones: rateZones }), "utf8");
 
 fs.writeFileSync(resultsPath, [
   "location,duration_days,pickup_date,dropoff_date,provider,provider_rating,total_price,price_per_day,pay_now_amount,pay_now_currency,currency,source",
@@ -39,6 +46,7 @@ fs.writeFileSync(coveragePath, [
 ].join("\n") + "\n", "utf8");
 
 const expectedPlanArgs = [
+  `--config=${configPath}`,
   "--expected-locations=Warsaw,Krakow,Gdansk",
   "--expected-durations=2",
   "--expected-pickup-count=2"
@@ -53,6 +61,7 @@ const payload = JSON.parse(fs.readFileSync(outputPath, "utf8"));
 assert.equal(payload.decision_count, 6);
 assert.equal(payload.active_count, 3);
 assert.deepEqual(payload.expected_locations, ["Gdansk", "Krakow", "Warsaw"]);
+assert.deepEqual(payload.rate_zones, rateZones);
 
 const byKey = new Map(payload.decisions.map((item) => [`${item.pickup_date}|${item.location}`, item]));
 const warsaw = byKey.get("2026-09-03|Warsaw");
@@ -67,6 +76,9 @@ assert.equal(warsaw.broker_markup_percent, 11.1111);
 assert.equal(warsaw.mm_net_rate_eur_day, 9);
 assert.equal(warsaw.site_target_net_rate_eur_day, 13.75);
 assert.equal(warsaw.maximum_adjustment_ratio, 1.5278);
+assert.equal(warsaw.rate_zone, "WAR");
+assert.equal(warsaw.rate_zone_name, "WARSZAWA - AIRPORT");
+assert.equal(warsaw.metroplex, "Main Metroplex");
 
 const krakow = byKey.get("2026-09-03|Krakow");
 assert.equal(krakow.recommendation_type, "top1_undercut");
@@ -78,6 +90,7 @@ const gdansk = byKey.get("2026-09-03|Gdansk");
 assert.equal(gdansk.recommendation_type, "rank_step_undercut");
 assert.equal(gdansk.target_rank, 2);
 assert.equal(gdansk.site_target_rate_eur_day, 10.75);
+assert.equal(gdansk.rate_zone, "GDA");
 
 assert.equal(byKey.get("2026-09-04|Warsaw").data_quality_status, "missing_mm");
 assert.equal(byKey.get("2026-09-04|Krakow").data_quality_status, "incomplete");
@@ -209,6 +222,18 @@ assert.match(workflow, /vipcars-rates-import-ready\.xlsx/);
 assert.match(workflow, /"public\/\$optional_file"/);
 assert.match(workflow, /%svipcars-recommendations\.xlsx/);
 assert.match(workflow, /%svipcars-rates-import-ready\.xlsx/);
+assert.match(workflow, /SCHEDULE_LOCATIONS: "Bydgoszcz,Warsaw,Krakow,Gdansk,Katowice,Wroclaw,Poznan"/);
+
+const productionConfig = JSON.parse(fs.readFileSync(path.join(root, "vipcars-rate-update.config.json"), "utf8"));
+assert.deepEqual(productionConfig.rate_zones, [
+  { location: "Bydgoszcz", code: "BYD", name: "BYDGOSZCZ - AIRPORT", metroplex: "Main Metroplex" },
+  { location: "Gdansk", code: "GDA", name: "GDANSK - AIRPORT", metroplex: "Main Metroplex" },
+  { location: "Katowice", code: "KAT", name: "KATOWICE - AIRPORT", metroplex: "Main Metroplex" },
+  { location: "Krakow", code: "KRA", name: "KRAKOW - AIRPORT", metroplex: "Main Metroplex" },
+  { location: "Poznan", code: "POZ", name: "POZNAN - AIRPORT", metroplex: "Main Metroplex" },
+  { location: "Warsaw", code: "WAR", name: "WARSZAWA - AIRPORT", metroplex: "Main Metroplex" },
+  { location: "Wroclaw", code: "WRO", name: "WROCLAW - AIRPORT", metroplex: "Main Metroplex" }
+]);
 
 const baselinePath = path.join(root, "input", "vipcars-rate-group-export.xlsx");
 const manifest = JSON.parse(fs.readFileSync(path.join(root, "input", "vipcars-baseline-manifest.json"), "utf8"));

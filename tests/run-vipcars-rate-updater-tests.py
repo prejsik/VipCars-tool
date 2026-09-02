@@ -20,6 +20,10 @@ HEADERS = [
     "Rate zone", "Booking start", "Booking end", "1  per day", "2  per day",
     "3 - 4  per day", "5 - 7  per day", "8+ per day",
 ]
+RATE_ZONES = [
+    {"location": "Krakow", "code": "KRA", "name": "KRAKOW - AIRPORT", "metroplex": "Main Metroplex"},
+    {"location": "Warsaw", "code": "WAR", "name": "WARSZAWA - AIRPORT", "metroplex": "Main Metroplex"},
+]
 
 
 def build_workbook(path: Path) -> None:
@@ -33,6 +37,8 @@ def build_workbook(path: Path) -> None:
     worksheet["A1"].font = Font(bold=True)
     worksheet["A1"].fill = PatternFill(fill_type="solid", fgColor="E7E6E6")
     worksheet.column_dimensions["A"].width = 15
+    worksheet.row_dimensions[2].height = 14.5
+    worksheet.row_dimensions[3].height = 14.5
     workbook.save(path)
 
 
@@ -45,6 +51,9 @@ def write_recommendations(path: Path) -> None:
         ):
             decisions.append({
                 "location": location,
+                "rate_zone": "WAR" if location == "Warsaw" else "KRA",
+                "rate_zone_name": "WARSZAWA - AIRPORT" if location == "Warsaw" else "KRAKOW - AIRPORT",
+                "metroplex": "Main Metroplex",
                 "pickup_date": pickup_date,
                 "dropoff_date": "2026-09-04",
                 "rental_days": 2,
@@ -156,6 +165,7 @@ def main() -> None:
             "apply_groups": ["CFAR"],
             "rate_precision": 3,
             "minimum_change_eur_day": 0.001,
+            "rate_zones": RATE_ZONES,
             "duration_bands": [
                 {"column": "I", "label": "1", "min_days": 1, "max_days": 1},
                 {"column": "J", "label": "2", "min_days": 2, "max_days": 2},
@@ -180,39 +190,47 @@ def main() -> None:
         assert import_book.sheetnames == ["RateGroup Export"]
         import_sheet = import_book["RateGroup Export"]
         assert [cell.value for cell in import_sheet[1]] == HEADERS
-        assert import_sheet.max_row == 5
+        assert import_sheet.max_row == 9
         assert import_sheet.freeze_panes == "G2"
         assert import_sheet.column_dimensions["A"].width == 15
+        assert all(import_sheet.row_dimensions[row].height == 14.5 for row in range(2, 10))
 
         rows = list(import_sheet.iter_rows(min_row=2, values_only=True))
         cfar_rows = [row for row in rows if row[0] == "CFAR"]
         cdmr_rows = [row for row in rows if row[0] == "CDMR"]
-        assert [(row[3], row[4]) for row in cfar_rows] == [
-            ("02/09/2026", "02/09/2026"),
-            ("03/09/2026", "03/09/2026"),
-        ]
-        assert [row[9] for row in cfar_rows] == [16, 16]
-        assert [row[10] for row in cfar_rows] == [18, 18]
-        assert [row[12] for row in cfar_rows] == [16, 16]
-        assert [row[9] for row in cdmr_rows] == [40, 40]
+        assert {(row[3], row[5]) for row in cfar_rows} == {
+            ("02/09/2026", "KRA"), ("02/09/2026", "WAR"),
+            ("03/09/2026", "KRA"), ("03/09/2026", "WAR"),
+        }
+        cfar_by_date_zone = {(row[3], row[5]): row for row in cfar_rows}
+        assert cfar_by_date_zone[("02/09/2026", "KRA")][9] == 16
+        assert cfar_by_date_zone[("02/09/2026", "WAR")][9] == 24
+        assert all(row[10] == 18 for row in cfar_rows)
+        assert all(row[12] == 16 for row in cfar_rows)
+        assert {row[5] for row in cdmr_rows} == {"KRA", "WAR"}
+        assert all(row[9] == 40 for row in cdmr_rows)
 
         report_book = load_workbook(report_path, data_only=False)
         assert report_book.sheetnames == [
             "RateGroup Export", "Changed Positions", "Recommendations Review", "Validation"
         ]
-        assert report_book["Changed Positions"].max_row == 3
+        assert report_book["Changed Positions"].max_row == 5
         assert report_book["Recommendations Review"].max_row == 11
         review_headers = [cell.value for cell in report_book["Recommendations Review"][1]]
         assert "Pay Now EUR" in review_headers
         assert "Broker markup" in review_headers
         assert "MM net EUR/day" in review_headers
         assert "Target net EUR/day" in review_headers
+        assert "Rate zone" in review_headers
+        assert "Rate zone name" in review_headers
+        assert "Metroplex" in review_headers
 
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         assert summary["source_workbook_sha256"] == source_hash
-        assert summary["expanded_source_row_count"] == 4
-        assert summary["change_count"] == 2
-        assert summary["blocked_band_count"] == 3
+        assert summary["expanded_source_row_count"] == 8
+        assert summary["change_count"] == 4
+        assert summary["blocked_band_count"] == 6
+        assert summary["rate_zone_count"] == 2
         assert {item["duration_band"] for item in summary["blocked_bands"]} == {"3-4", "5-7", "8+"}
 
         wrong_manifest = temp / "wrong-baseline.json"
@@ -233,6 +251,31 @@ def main() -> None:
         assert rejected.returncode != 0
         assert "baseline manifest" in (rejected.stderr + rejected.stdout).lower()
         assert not rejected_path.exists()
+
+        partial_run_recommendations = json.loads(recommendations_path.read_text(encoding="utf-8"))
+        partial_run_recommendations["expected_locations"] = ["Krakow"]
+        partial_run_recommendations["decisions"] = [
+            item for item in partial_run_recommendations["decisions"]
+            if item["location"] == "Krakow"
+        ]
+        partial_run_path = temp / "partial-run-recommendations.json"
+        partial_run_path.write_text(json.dumps(partial_run_recommendations), encoding="utf-8")
+        partial_run_report = temp / "partial-run-report.xlsx"
+        partial_run_import = temp / "partial-run-import.xlsx"
+        partial_run = subprocess.run([
+            sys.executable, str(SCRIPT),
+            "--workbook", str(workbook_path),
+            "--recommendations", str(partial_run_path),
+            "--config", str(config_path),
+            "--report-output", str(partial_run_report),
+            "--import-output", str(partial_run_import),
+        ], cwd=ROOT, capture_output=True, text=True)
+        assert partial_run.returncode != 0
+        assert "must cover every configured rate zone" in (
+            partial_run.stderr + partial_run.stdout
+        ).lower()
+        assert not partial_run_report.exists()
+        assert not partial_run_import.exists()
 
         uncovered_recommendations_path = temp / "uncovered-recommendations.json"
         uncovered_recommendations_path.write_text(json.dumps({
@@ -290,6 +333,34 @@ def main() -> None:
         assert extra_result.returncode != 0
         assert "exactly 13 columns" in (extra_result.stderr + extra_result.stdout).lower()
 
+        partial_zone_workbook = temp / "partial-zone.xlsx"
+        build_workbook(partial_zone_workbook)
+        partial_zone_book = load_workbook(partial_zone_workbook)
+        partial_zone_sheet = partial_zone_book["RateGroup Export"]
+        for row in range(2, partial_zone_sheet.max_row + 1):
+            partial_zone_sheet.cell(row, 6).value = "KRA"
+        partial_zone_book.save(partial_zone_workbook)
+        partial_zone_manifest = temp / "partial-zone-baseline.json"
+        partial_zone_manifest.write_text(json.dumps({
+            "workbook_sha256": hashlib.sha256(partial_zone_workbook.read_bytes()).hexdigest()
+        }), encoding="utf-8")
+        partial_zone_config = json.loads(config_path.read_text(encoding="utf-8"))
+        partial_zone_config["baseline_manifest_file"] = str(partial_zone_manifest)
+        partial_zone_config_path = temp / "partial-zone-config.json"
+        partial_zone_config_path.write_text(json.dumps(partial_zone_config), encoding="utf-8")
+        partial_zone_result = subprocess.run([
+            sys.executable, str(SCRIPT),
+            "--workbook", str(partial_zone_workbook),
+            "--recommendations", str(recommendations_path),
+            "--config", str(partial_zone_config_path),
+            "--report-output", str(temp / "partial-zone-report.xlsx"),
+            "--import-output", str(temp / "partial-zone-import.xlsx"),
+        ], cwd=ROOT, capture_output=True, text=True)
+        assert partial_zone_result.returncode != 0
+        assert "missing configured rate zones: war" in (
+            partial_zone_result.stderr + partial_zone_result.stdout
+        ).lower()
+
     production_config = json.loads((ROOT / "vipcars-rate-update.config.json").read_text(encoding="utf-8"))
     production_manifest = json.loads(
         (ROOT / "input" / "vipcars-baseline-manifest.json").read_text(encoding="utf-8")
@@ -303,6 +374,15 @@ def main() -> None:
         "CFAR", "CFAR1", "CFAR2", "CWAR", "CWAR1", "CWAR2", "CWAR3",
         "EDAR", "IDAR", "IDAR1", "IFAR", "IFAR1", "IFAR2", "PDAR", "PFAR",
     }
+    assert production_config["rate_zones"] == [
+        {"location": "Bydgoszcz", "code": "BYD", "name": "BYDGOSZCZ - AIRPORT", "metroplex": "Main Metroplex"},
+        {"location": "Gdansk", "code": "GDA", "name": "GDANSK - AIRPORT", "metroplex": "Main Metroplex"},
+        {"location": "Katowice", "code": "KAT", "name": "KATOWICE - AIRPORT", "metroplex": "Main Metroplex"},
+        {"location": "Krakow", "code": "KRA", "name": "KRAKOW - AIRPORT", "metroplex": "Main Metroplex"},
+        {"location": "Poznan", "code": "POZ", "name": "POZNAN - AIRPORT", "metroplex": "Main Metroplex"},
+        {"location": "Warsaw", "code": "WAR", "name": "WARSZAWA - AIRPORT", "metroplex": "Main Metroplex"},
+        {"location": "Wroclaw", "code": "WRO", "name": "WROCLAW - AIRPORT", "metroplex": "Main Metroplex"},
+    ]
 
     print("All VipCars rate updater tests passed.")
 

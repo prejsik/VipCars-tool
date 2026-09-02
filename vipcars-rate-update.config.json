@@ -20,6 +20,15 @@
   ],
   "rate_precision": 3,
   "minimum_change_eur_day": 0.001,
+  "rate_zones": [
+    { "location": "Bydgoszcz", "code": "BYD", "name": "BYDGOSZCZ - AIRPORT", "metroplex": "Main Metroplex" },
+    { "location": "Gdansk", "code": "GDA", "name": "GDANSK - AIRPORT", "metroplex": "Main Metroplex" },
+    { "location": "Katowice", "code": "KAT", "name": "KATOWICE - AIRPORT", "metroplex": "Main Metroplex" },
+    { "location": "Krakow", "code": "KRA", "name": "KRAKOW - AIRPORT", "metroplex": "Main Metroplex" },
+    { "location": "Poznan", "code": "POZ", "name": "POZNAN - AIRPORT", "metroplex": "Main Metroplex" },
+    { "location": "Warsaw", "code": "WAR", "name": "WARSZAWA - AIRPORT", "metroplex": "Main Metroplex" },
+    { "location": "Wroclaw", "code": "WRO", "name": "WROCLAW - AIRPORT", "metroplex": "Main Metroplex" }
+  ],
   "pricing": {
     "threshold_eur_day": 2.5,
     "undercut_eur_day": 0.25,

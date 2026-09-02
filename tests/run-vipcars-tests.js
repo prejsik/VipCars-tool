@@ -192,6 +192,16 @@ runTest("resolveVipCarsLocation maps Katowice to KTW", () => {
   });
 });
 
+runTest("resolveVipCarsLocation maps Bydgoszcz to BZG", () => {
+  assert.deepEqual(resolveVipCarsLocation("Bydgoszcz"), {
+    name: "Bydgoszcz Airport [BZG]",
+    code: "BZG",
+    countryId: "119",
+    cityId: "1733",
+    locationId: "676"
+  });
+});
+
 runTest("buildSearchUrl uses exact VipCars search parameters", () => {
   const config = loadConfig([
     "--location", "Katowice",

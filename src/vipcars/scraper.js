@@ -321,6 +321,9 @@ class VipCarsScraper {
 }
 
 const LOCATION_ALIASES = new Map([
+  ["bydgoszcz", { name: "Bydgoszcz Airport [BZG]", code: "BZG", countryId: "119", cityId: "1733", locationId: "676" }],
+  ["bydgoszcz airport", { name: "Bydgoszcz Airport [BZG]", code: "BZG", countryId: "119", cityId: "1733", locationId: "676" }],
+  ["bzg", { name: "Bydgoszcz Airport [BZG]", code: "BZG", countryId: "119", cityId: "1733", locationId: "676" }],
   ["warsaw", { name: "Warsaw Chopin Airport [WAW]", code: "WAW", countryId: "119", cityId: "1744", locationId: "10921" }],
   ["warsaw chopin", { name: "Warsaw Chopin Airport [WAW]", code: "WAW", countryId: "119", cityId: "1744", locationId: "10921" }],
   ["waw", { name: "Warsaw Chopin Airport [WAW]", code: "WAW", countryId: "119", cityId: "1744", locationId: "10921" }],

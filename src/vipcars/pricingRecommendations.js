@@ -41,6 +41,43 @@ function matrixKey(row) {
   return [row.pickup_date, Number(row.duration_days), row.location].join("|");
 }
 
+function rateZonePlan(rawRateZones, expectedLocations) {
+  const rateZones = Array.isArray(rawRateZones) ? rawRateZones.map((item) => ({
+    location: String(item?.location || "").trim(),
+    code: String(item?.code || "").trim().toUpperCase(),
+    name: String(item?.name || "").trim(),
+    metroplex: String(item?.metroplex || "").trim()
+  })) : [];
+  if (!rateZones.length) {
+    return { rateZones: [], byLocation: new Map() };
+  }
+
+  const byLocation = new Map();
+  const codes = new Set();
+  for (const rateZone of rateZones) {
+    if (!rateZone.location || !rateZone.code || !rateZone.name || !rateZone.metroplex) {
+      throw new Error("Every rate zone requires location, code, name, and metroplex.");
+    }
+    const locationKey = rateZone.location.toLowerCase();
+    if (byLocation.has(locationKey) || codes.has(rateZone.code)) {
+      throw new Error(`Duplicate rate zone mapping: ${rateZone.location} / ${rateZone.code}.`);
+    }
+    byLocation.set(locationKey, rateZone);
+    codes.add(rateZone.code);
+  }
+
+  const missing = expectedLocations.filter((location) => !byLocation.has(String(location).toLowerCase()));
+  if (missing.length) {
+    throw new Error(`Rate zone mapping is missing run locations: ${missing.join(", ")}.`);
+  }
+  return {
+    rateZones: rateZones.filter((item) => expectedLocations.some(
+      (location) => String(location).toLowerCase() === item.location.toLowerCase()
+    )),
+    byLocation
+  };
+}
+
 function validateCoverageMatrix(coverageRows, options) {
   if (!coverageRows.length) {
     throw new Error("Coverage is empty; pricing recommendations cannot be generated.");
@@ -99,9 +136,12 @@ function validateCoverageMatrix(coverageRows, options) {
   return { expectedLocations, expectedDurations };
 }
 
-function decisionBase(check) {
+function decisionBase(check, rateZone) {
   return {
     location: check.location,
+    rate_zone: rateZone?.code || null,
+    rate_zone_name: rateZone?.name || null,
+    metroplex: rateZone?.metroplex || null,
     pickup_date: check.pickup_date,
     dropoff_date: check.dropoff_date,
     rental_days: Number(check.duration_days),
@@ -207,13 +247,13 @@ function applySiteTarget(decision, target, options) {
   return decision;
 }
 
-function blockedDecision(check, status, reason) {
-  return { ...decisionBase(check), data_quality_status: status, reason };
+function blockedDecision(check, status, reason, rateZone) {
+  return { ...decisionBase(check, rateZone), data_quality_status: status, reason };
 }
 
-function buildDecision(check, offers, options) {
+function buildDecision(check, offers, options, rateZone) {
   if (check.status !== "complete") {
-    return blockedDecision(check, "incomplete", check.error || "Coverage is incomplete.");
+    return blockedDecision(check, "incomplete", check.error || "Coverage is incomplete.", rateZone);
   }
 
   const ranked = offers
@@ -221,19 +261,19 @@ function buildDecision(check, offers, options) {
     .sort((left, right) => dailyRate(left) - dailyRate(right));
   const mmIndex = ranked.findIndex((offer) => isMmCarsProvider(offer.provider));
   if (mmIndex < 0) {
-    return blockedDecision(check, "missing_mm", "MM Cars Rental is not present in the completed result set.");
+    return blockedDecision(check, "missing_mm", "MM Cars Rental is not present in the completed result set.", rateZone);
   }
 
   const mm = ranked[mmIndex];
   const mmCurrency = String(mm.currency || "").toUpperCase();
   if (mmCurrency !== "EUR") {
-    return blockedDecision(check, "invalid_currency", `MM Cars Rental currency is ${mmCurrency || "missing"}, expected EUR.`);
+    return blockedDecision(check, "invalid_currency", `MM Cars Rental currency is ${mmCurrency || "missing"}, expected EUR.`, rateZone);
   }
 
   const mmRate = dailyRate(mm);
   const calibration = payNowCalibration(mm, options);
   if (calibration.error) {
-    const decision = blockedDecision(check, calibration.error, calibration.reason);
+    const decision = blockedDecision(check, calibration.error, calibration.reason, rateZone);
     decision.mm_rank = mmIndex + 1;
     decision.mm_rate_eur_day = roundRate(mmRate);
     return decision;
@@ -242,14 +282,14 @@ function buildDecision(check, offers, options) {
     !isMmCarsProvider(offer.provider) && String(offer.currency || "").toUpperCase() === "EUR"
   ));
   if (!eurCompetitors.length) {
-    const decision = blockedDecision(check, "missing_benchmark", "No EUR competitor is available for comparison.");
+    const decision = blockedDecision(check, "missing_benchmark", "No EUR competitor is available for comparison.", rateZone);
     decision.mm_rank = mmIndex + 1;
     decision.mm_rate_eur_day = roundRate(mmRate);
     Object.assign(decision, calibration);
     return decision;
   }
 
-  const decision = decisionBase(check);
+  const decision = decisionBase(check, rateZone);
   decision.mm_rank = mmIndex + 1;
   decision.mm_rate_eur_day = roundRate(mmRate);
   Object.assign(decision, calibration);
@@ -279,7 +319,7 @@ function buildDecision(check, offers, options) {
 
   const previous = ranked[mmIndex - 1];
   if (!previous || isMmCarsProvider(previous.provider) || String(previous.currency || "").toUpperCase() !== "EUR") {
-    return blockedDecision(check, "missing_benchmark", "The immediately preceding offer is not a comparable EUR competitor.");
+    return blockedDecision(check, "missing_benchmark", "The immediately preceding offer is not a comparable EUR competitor.", rateZone);
   }
 
   const previousRate = dailyRate(previous);
@@ -317,6 +357,7 @@ function buildRecommendations(resultRows, coverageRows, options = {}) {
     maxAdjustmentRatio: Number(options.maxAdjustmentRatio ?? DEFAULT_MAX_ADJUSTMENT_RATIO)
   };
   const coveragePlan = validateCoverageMatrix(coverageRows, options);
+  const zones = rateZonePlan(options.rateZones, coveragePlan.expectedLocations);
   const offersByCheck = new Map();
   for (const row of resultRows) {
     const key = checkKey(row);
@@ -328,7 +369,12 @@ function buildRecommendations(resultRows, coverageRows, options = {}) {
 
   const checks = coverageRows;
   const decisions = checks
-    .map((check) => buildDecision(check, offersByCheck.get(checkKey(check)) || [], settings))
+    .map((check) => buildDecision(
+      check,
+      offersByCheck.get(checkKey(check)) || [],
+      settings,
+      zones.byLocation.get(String(check.location).toLowerCase())
+    ))
     .sort((left, right) => (
       left.pickup_date.localeCompare(right.pickup_date)
       || left.rental_days - right.rental_days
@@ -344,6 +390,7 @@ function buildRecommendations(resultRows, coverageRows, options = {}) {
     threshold_eur_day: settings.thresholdEurDay,
     undercut_eur_day: settings.undercutEurDay,
     expected_locations: coveragePlan.expectedLocations,
+    rate_zones: zones.rateZones,
     covered_durations: coveragePlan.expectedDurations,
     decision_count: decisions.length,
     active_count: decisions.filter((decision) => decision.action !== "hold").length,
@@ -373,6 +420,7 @@ function loadOptions(argv) {
     maxBrokerMarkupMultiplier: pricing.max_broker_markup_multiplier,
     minAdjustmentRatio: pricing.min_adjustment_ratio,
     maxAdjustmentRatio: pricing.max_adjustment_ratio,
+    rateZones: config.rate_zones,
     expectedLocations: listValue("expected-locations").length
       ? listValue("expected-locations")
       : runPlan?.locations,

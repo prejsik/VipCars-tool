@@ -89,8 +89,14 @@ def validate_sheet(worksheet) -> None:
         raise ValueError(f"Unexpected import headers: {actual!r}")
 
 
-def copy_row(worksheet, source_row: int, target_row: int) -> None:
-    for column in range(1, worksheet.max_column + 1):
+def copy_row(worksheet, source_row: int, target_row: int, max_column: int | None = None) -> None:
+    source_dimension = worksheet.row_dimensions[source_row]
+    target_dimension = worksheet.row_dimensions[target_row]
+    target_dimension.height = source_dimension.height
+    target_dimension.hidden = source_dimension.hidden
+    target_dimension.outlineLevel = source_dimension.outlineLevel
+    target_dimension.collapsed = source_dimension.collapsed
+    for column in range(1, (max_column or worksheet.max_column) + 1):
         source = worksheet.cell(source_row, column)
         target = worksheet.cell(target_row, column)
         target.value = source.value
@@ -110,23 +116,45 @@ def copy_row(worksheet, source_row: int, target_row: int) -> None:
 
 def expand_pickup_ranges(worksheet) -> int:
     validate_sheet(worksheet)
-    for row_index in range(worksheet.max_row, 1, -1):
+    original_rows = []
+    for row_index in range(2, worksheet.max_row + 1):
         start = parse_date(worksheet.cell(row_index, 4).value)
         end = parse_date(worksheet.cell(row_index, 5).value)
         if end < start:
             raise ValueError(f"Pickup end precedes pickup start in row {row_index}.")
+        dimension = worksheet.row_dimensions[row_index]
+        original_rows.append((
+            row_index,
+            start,
+            end,
+            dimension.height,
+            dimension.hidden,
+            dimension.outlineLevel,
+            dimension.collapsed,
+        ))
+
+    for row_index, start, end, *_ in reversed(original_rows):
         days = (end - start).days + 1
-        original_height = worksheet.row_dimensions[row_index].height
         for offset in range(1, days):
             target_row = row_index + offset
             worksheet.insert_rows(target_row)
             copy_row(worksheet, row_index, target_row)
-            worksheet.row_dimensions[target_row].height = original_height
         for offset in range(days):
             day = start + timedelta(days=offset)
             target_row = row_index + offset
             worksheet.cell(target_row, 4).value = day.strftime("%d/%m/%Y")
             worksheet.cell(target_row, 5).value = day.strftime("%d/%m/%Y")
+
+    target_row = 2
+    for _, start, end, height, hidden, outline_level, collapsed in original_rows:
+        days = (end - start).days + 1
+        for _ in range(days):
+            dimension = worksheet.row_dimensions[target_row]
+            dimension.height = height
+            dimension.hidden = hidden
+            dimension.outlineLevel = outline_level
+            dimension.collapsed = collapsed
+            target_row += 1
     return worksheet.max_row - 1
 
 
@@ -137,34 +165,122 @@ def find_band(duration: int, bands: list[dict[str, Any]]) -> dict[str, Any] | No
     )
 
 
+def normalize_rate_zones(config: dict[str, Any]) -> list[dict[str, str]]:
+    raw_rate_zones = config.get("rate_zones", [])
+    if not isinstance(raw_rate_zones, list) or not raw_rate_zones:
+        raise ValueError("Config is missing rate_zones.")
+    rate_zones: list[dict[str, str]] = []
+    locations: set[str] = set()
+    codes: set[str] = set()
+    for raw in raw_rate_zones:
+        item = {
+            "location": str(raw.get("location", "")).strip(),
+            "code": str(raw.get("code", "")).strip().upper(),
+            "name": str(raw.get("name", "")).strip(),
+            "metroplex": str(raw.get("metroplex", "")).strip(),
+        }
+        location_key = item["location"].lower()
+        if not all(item.values()):
+            raise ValueError("Every rate zone requires location, code, name, and metroplex.")
+        if location_key in locations or item["code"] in codes:
+            raise ValueError(f"Duplicate rate zone mapping: {item['location']} / {item['code']}.")
+        locations.add(location_key)
+        codes.add(item["code"])
+        rate_zones.append(item)
+    return rate_zones
+
+
+def expand_rate_zones(worksheet, rate_zones: list[dict[str, str]]) -> int:
+    configured_codes = {item["code"] for item in rate_zones}
+    existing = [
+        str(worksheet.cell(row, 6).value or "").strip().upper()
+        for row in range(2, worksheet.max_row + 1)
+    ]
+    populated = {value for value in existing if value}
+    if populated:
+        if any(not value for value in existing):
+            raise ValueError("Rate zone column mixes populated and blank rows.")
+        unknown = sorted(populated - configured_codes)
+        if unknown:
+            raise ValueError(f"Workbook contains unsupported rate zones: {', '.join(unknown)}.")
+        missing = sorted(configured_codes - populated)
+        if missing:
+            raise ValueError(f"Workbook is missing configured rate zones: {', '.join(missing)}.")
+        for row, code in enumerate(existing, start=2):
+            worksheet.cell(row, 6).value = code
+        return worksheet.max_row - 1
+
+    original_max_row = worksheet.max_row
+    max_column = worksheet.max_column
+    first_zone = rate_zones[0]
+    target_row = original_max_row + 1
+    for source_row in range(2, original_max_row + 1):
+        worksheet.cell(source_row, 6).value = first_zone["code"]
+        for rate_zone in rate_zones[1:]:
+            copy_row(worksheet, source_row, target_row, max_column)
+            worksheet.cell(target_row, 6).value = rate_zone["code"]
+            target_row += 1
+    return worksheet.max_row - 1
+
+
 def build_band_plans(
     recommendations: dict[str, Any],
     bands: list[dict[str, Any]],
-) -> tuple[dict[tuple[str, str], dict[str, Any]], list[dict[str, Any]]]:
+    rate_zones: list[dict[str, str]],
+) -> tuple[dict[tuple[str, str, str], dict[str, Any]], list[dict[str, Any]]]:
     decisions = recommendations.get("decisions", [])
     expected_locations = sorted(set(recommendations.get("expected_locations", [])))
+    zone_by_location = {item["location"].lower(): item for item in rate_zones}
+    expected_location_keys = {location.lower() for location in expected_locations}
+    missing_run_locations = [
+        item["location"] for item in rate_zones if item["location"].lower() not in expected_location_keys
+    ]
+    unsupported_run_locations = sorted(
+        location for location in expected_locations if location.lower() not in zone_by_location
+    )
+    if missing_run_locations or unsupported_run_locations:
+        details = []
+        if missing_run_locations:
+            details.append(f"missing: {', '.join(missing_run_locations)}")
+        if unsupported_run_locations:
+            details.append(f"unsupported: {', '.join(unsupported_run_locations)}")
+        raise ValueError(
+            "Recommendation run must cover every configured rate zone location; " + "; ".join(details) + "."
+        )
     by_key: dict[tuple[str, int, str], dict[str, Any]] = {}
-    candidates: set[tuple[str, str]] = set()
+    candidates: set[tuple[str, str, str]] = set()
     band_by_column = {str(band["column"]): band for band in bands}
 
     for decision in decisions:
         pickup_date = str(decision.get("pickup_date", ""))
         duration = int(decision.get("rental_days", 0) or 0)
         location = str(decision.get("location", ""))
-        by_key[(pickup_date, duration, location)] = decision
+        rate_zone = zone_by_location.get(location.lower())
+        if not rate_zone:
+            raise ValueError(f"Recommendation location has no rate zone mapping: {location or 'missing'}.")
+        declared_zone = str(decision.get("rate_zone") or "").strip().upper()
+        if declared_zone and declared_zone != rate_zone["code"]:
+            raise ValueError(
+                f"Recommendation rate zone {declared_zone} does not match {location} / {rate_zone['code']}."
+            )
+        by_key[(pickup_date, duration, location.lower())] = decision
         band = find_band(duration, bands)
         if band:
-            candidates.add((pickup_date, str(band["column"])))
+            candidates.add((pickup_date, str(band["column"]), rate_zone["code"]))
 
-    plans: dict[tuple[str, str], dict[str, Any]] = {}
+    plans: dict[tuple[str, str, str], dict[str, Any]] = {}
     blocked: list[dict[str, Any]] = []
-    for pickup_date, column in sorted(candidates):
+    zone_by_code = {item["code"]: item for item in rate_zones}
+    for pickup_date, column, zone_code in sorted(candidates):
         band = band_by_column[column]
+        rate_zone = zone_by_code[zone_code]
         if band.get("update_enabled", True) is False:
             blocked.append({
                 "pickup_date": pickup_date,
                 "duration_band": str(band["label"]),
                 "column": column,
+                "rate_zone": zone_code,
+                "rate_zone_name": rate_zone["name"],
                 "reason": "Automatic updates are disabled because the import band is open-ended.",
             })
             continue
@@ -172,39 +288,42 @@ def build_band_plans(
         missing: list[str] = []
         ratios: list[tuple[float, dict[str, Any]]] = []
         for duration in required_durations:
-            for location in expected_locations:
-                decision = by_key.get((pickup_date, duration, location))
-                if not decision:
-                    missing.append(f"{location}/{duration}d missing")
-                    continue
-                if decision.get("coverage_status") != "complete" or decision.get("data_quality_status") != "ok":
-                    missing.append(
-                        f"{location}/{duration}d {decision.get('data_quality_status') or decision.get('coverage_status')}"
-                    )
-                    continue
-                try:
-                    ratio = float(decision.get("maximum_adjustment_ratio"))
-                except (TypeError, ValueError):
-                    missing.append(f"{location}/{duration}d invalid ratio")
-                    continue
-                if ratio <= 0:
-                    missing.append(f"{location}/{duration}d invalid ratio")
-                    continue
-                ratios.append((ratio, decision))
+            location = rate_zone["location"]
+            decision = by_key.get((pickup_date, duration, location.lower()))
+            if not decision:
+                missing.append(f"{location}/{duration}d missing")
+                continue
+            if decision.get("coverage_status") != "complete" or decision.get("data_quality_status") != "ok":
+                missing.append(
+                    f"{location}/{duration}d {decision.get('data_quality_status') or decision.get('coverage_status')}"
+                )
+                continue
+            try:
+                ratio = float(decision.get("maximum_adjustment_ratio"))
+            except (TypeError, ValueError):
+                missing.append(f"{location}/{duration}d invalid ratio")
+                continue
+            if ratio <= 0:
+                missing.append(f"{location}/{duration}d invalid ratio")
+                continue
+            ratios.append((ratio, decision))
 
         if missing or not ratios:
             blocked.append({
                 "pickup_date": pickup_date,
                 "duration_band": str(band["label"]),
                 "column": column,
+                "rate_zone": zone_code,
+                "rate_zone_name": rate_zone["name"],
                 "reason": "; ".join(missing) if missing else "No usable decisions.",
             })
             continue
         ratio, controlling = min(ratios, key=lambda item: item[0])
-        plans[(pickup_date, column)] = {
+        plans[(pickup_date, column, zone_code)] = {
             "ratio": ratio,
             "band": band,
             "controlling": controlling,
+            "rate_zone": rate_zone,
         }
     return plans, blocked
 
@@ -214,15 +333,17 @@ def apply_plans(worksheet, plans, config: dict[str, Any], annotate: bool) -> lis
     precision = int(config.get("rate_precision", 3))
     minimum_change = float(config.get("minimum_change_eur_day", 0.001))
     changes: list[dict[str, Any]] = []
+    plans_by_scope: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
+    for (pickup_date, column, zone_code), plan in plans.items():
+        plans_by_scope.setdefault((pickup_date, zone_code), []).append((column, plan))
 
     for row_index in range(2, worksheet.max_row + 1):
         group = str(worksheet.cell(row_index, 1).value or "")
         if group not in groups:
             continue
         pickup_date = parse_date(worksheet.cell(row_index, 4).value).isoformat()
-        for (_date, column), plan in plans.items():
-            if _date != pickup_date:
-                continue
+        zone_code = str(worksheet.cell(row_index, 6).value or "").strip().upper()
+        for column, plan in plans_by_scope.get((pickup_date, zone_code), []):
             column_index = column_index_from_string(column)
             cell = worksheet.cell(row_index, column_index)
             try:
@@ -238,6 +359,9 @@ def apply_plans(worksheet, plans, config: dict[str, Any], annotate: bool) -> lis
                 "row": row_index,
                 "cell": cell.coordinate,
                 "group": group,
+                "rate_zone": zone_code,
+                "rate_zone_name": plan["rate_zone"]["name"],
+                "metroplex": plan["rate_zone"]["metroplex"],
                 "pickup_date": pickup_date,
                 "duration_band": str(plan["band"]["label"]),
                 "original_rate": original,
@@ -261,30 +385,32 @@ def apply_plans(worksheet, plans, config: dict[str, Any], annotate: bool) -> lis
 
 def validate_plan_targets(worksheet, plans, config: dict[str, Any]) -> None:
     groups = set(config.get("apply_groups", []))
-    available: set[tuple[str, str, str]] = set()
+    available: set[tuple[str, str, str, str]] = set()
+    columns_by_scope: dict[tuple[str, str], set[str]] = {}
+    for pickup_date, column, zone_code in plans:
+        columns_by_scope.setdefault((pickup_date, zone_code), set()).add(column)
     for row_index in range(2, worksheet.max_row + 1):
         group = str(worksheet.cell(row_index, 1).value or "")
         if group not in groups:
             continue
         pickup_date = parse_date(worksheet.cell(row_index, 4).value).isoformat()
-        for _plan_date, column in plans:
-            if _plan_date != pickup_date:
-                continue
+        zone_code = str(worksheet.cell(row_index, 6).value or "").strip().upper()
+        for column in columns_by_scope.get((pickup_date, zone_code), set()):
             value = worksheet.cell(row_index, column_index_from_string(column)).value
             try:
                 float(value)
             except (TypeError, ValueError):
                 continue
-            available.add((pickup_date, column, group))
+            available.add((pickup_date, column, zone_code, group))
 
-    for (pickup_date, column), plan in plans.items():
+    for (pickup_date, column, zone_code), plan in plans.items():
         missing_groups = sorted(
-            group for group in groups if (pickup_date, column, group) not in available
+            group for group in groups if (pickup_date, column, zone_code, group) not in available
         )
         if missing_groups:
             raise ValueError(
                 "Baseline workbook does not cover planned rate target "
-                f"{pickup_date} / {plan['band']['label']} days for groups: {', '.join(missing_groups)}."
+                f"{pickup_date} / {zone_code} / {plan['band']['label']} days for groups: {', '.join(missing_groups)}."
             )
 
 
@@ -304,13 +430,15 @@ def style_report_sheet(worksheet) -> None:
 def add_report_sheets(workbook, recommendations, changes, blocked, source_hash, expanded_rows) -> None:
     changed_sheet = workbook.create_sheet("Changed Positions")
     changed_headers = [
-        "Row", "Cell", "Group", "Pickup date", "Duration band", "Original rate",
+        "Row", "Cell", "Group", "Rate zone", "Rate zone name", "Metroplex",
+        "Pickup date", "Duration band", "Original rate",
         "Updated rate", "Adjustment ratio", "Controlling location", "Controlling duration", "Reason",
     ]
     changed_sheet.append(changed_headers)
     for change in changes:
         changed_sheet.append([
-            change["row"], change["cell"], change["group"], change["pickup_date"],
+            change["row"], change["cell"], change["group"], change["rate_zone"],
+            change["rate_zone_name"], change["metroplex"], change["pickup_date"],
             change["duration_band"], change["original_rate"], change["updated_rate"],
             change["adjustment_ratio"], change["controlling_location"],
             change["controlling_duration_days"], change["reason"],
@@ -319,7 +447,8 @@ def add_report_sheets(workbook, recommendations, changes, blocked, source_hash, 
 
     review_sheet = workbook.create_sheet("Recommendations Review")
     review_headers = [
-        "Pickup date", "Duration", "Location", "Action", "Type", "Quality", "Coverage",
+        "Pickup date", "Duration", "Location", "Rate zone", "Rate zone name", "Metroplex",
+        "Action", "Type", "Quality", "Coverage",
         "MM rank", "MM EUR/day", "Pay Now EUR", "Pay Now EUR/day", "Pay Now share",
         "Broker markup", "Broker multiplier", "MM net EUR/day", "Benchmark", "Benchmark EUR/day",
         "Target EUR/day", "Target net EUR/day", "Max multiplier", "Reason",
@@ -328,6 +457,7 @@ def add_report_sheets(workbook, recommendations, changes, blocked, source_hash, 
     for decision in recommendations.get("decisions", []):
         review_sheet.append([
             decision.get("pickup_date"), decision.get("rental_days"), decision.get("location"),
+            decision.get("rate_zone"), decision.get("rate_zone_name"), decision.get("metroplex"),
             decision.get("action"), decision.get("recommendation_type"), decision.get("data_quality_status"),
             decision.get("coverage_status"), decision.get("mm_rank"), decision.get("mm_rate_eur_day"),
             decision.get("pay_now_total_eur"), decision.get("pay_now_eur_day"),
@@ -347,14 +477,14 @@ def add_report_sheets(workbook, recommendations, changes, blocked, source_hash, 
     validation_sheet.append(["Blocked duration bands", "REVIEW" if blocked else "OK", len(blocked)])
     for item in blocked:
         validation_sheet.append([
-            f"{item['pickup_date']} / {item['duration_band']} days",
+            f"{item['pickup_date']} / {item['rate_zone']} / {item['duration_band']} days",
             "BLOCKED",
             item["reason"],
         ])
     style_report_sheet(validation_sheet)
 
 
-def prepare_workbook(source: Path, worksheet_name: str):
+def prepare_workbook(source: Path, worksheet_name: str, rate_zones: list[dict[str, str]]):
     workbook = load_workbook(source)
     if worksheet_name not in workbook.sheetnames:
         raise ValueError(f"Worksheet {worksheet_name!r} was not found.")
@@ -362,7 +492,8 @@ def prepare_workbook(source: Path, worksheet_name: str):
         if sheet.title != worksheet_name:
             workbook.remove(sheet)
     worksheet = workbook[worksheet_name]
-    expanded_rows = expand_pickup_ranges(worksheet)
+    expand_pickup_ranges(worksheet)
+    expanded_rows = expand_rate_zones(worksheet, rate_zones)
     return workbook, worksheet, expanded_rows
 
 
@@ -380,14 +511,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     bands = config.get("duration_bands", [])
     if not bands:
         raise ValueError("Config is missing duration_bands.")
-    plans, blocked = build_band_plans(recommendations, bands)
+    rate_zones = normalize_rate_zones(config)
+    plans, blocked = build_band_plans(recommendations, bands, rate_zones)
     worksheet_name = str(config.get("worksheet", "RateGroup Export"))
 
-    import_book, import_sheet, expanded_rows = prepare_workbook(workbook_path, worksheet_name)
+    import_book, import_sheet, expanded_rows = prepare_workbook(workbook_path, worksheet_name, rate_zones)
     validate_plan_targets(import_sheet, plans, config)
     import_changes = apply_plans(import_sheet, plans, config, annotate=False)
 
-    report_book, report_sheet, report_expanded_rows = prepare_workbook(workbook_path, worksheet_name)
+    report_book, report_sheet, report_expanded_rows = prepare_workbook(workbook_path, worksheet_name, rate_zones)
     report_changes = apply_plans(report_sheet, plans, config, annotate=True)
     if report_expanded_rows != expanded_rows or len(report_changes) != len(import_changes):
         raise RuntimeError("Report and import workbooks diverged during generation.")
@@ -403,6 +535,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "expanded_source_row_count": expanded_rows,
         "change_count": len(import_changes),
         "blocked_band_count": len(blocked),
+        "rate_zone_count": len(rate_zones),
         "blocked_bands": blocked,
         "report_output": str(report_output),
         "import_output": str(import_output),
