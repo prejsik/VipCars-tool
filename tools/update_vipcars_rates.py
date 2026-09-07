@@ -102,12 +102,6 @@ def copy_row(worksheet, source_row: int, target_row: int, max_column: int | None
         target.value = source.value
         if source.has_style:
             target._style = copy(source._style)
-        if source.number_format:
-            target.number_format = source.number_format
-        if source.alignment:
-            target.alignment = copy(source.alignment)
-        if source.protection:
-            target.protection = copy(source.protection)
         if source.hyperlink:
             target._hyperlink = copy(source.hyperlink)
         if source.comment:
@@ -135,9 +129,10 @@ def expand_pickup_ranges(worksheet) -> int:
 
     for row_index, start, end, *_ in reversed(original_rows):
         days = (end - start).days + 1
+        if days > 1:
+            worksheet.insert_rows(row_index + 1, days - 1)
         for offset in range(1, days):
             target_row = row_index + offset
-            worksheet.insert_rows(target_row)
             copy_row(worksheet, row_index, target_row)
         for offset in range(days):
             day = start + timedelta(days=offset)
@@ -247,6 +242,20 @@ def build_band_plans(
         raise ValueError(
             "Recommendation run must cover every configured rate zone location; " + "; ".join(details) + "."
         )
+    decision_location_keys = {
+        str(decision.get("location", "")).strip().lower()
+        for decision in decisions
+    }
+    missing_decision_locations = [
+        item["location"] for item in rate_zones
+        if item["location"].lower() not in decision_location_keys
+    ]
+    if missing_decision_locations:
+        raise ValueError(
+            "Recommendation decision data is missing expected locations: "
+            + ", ".join(missing_decision_locations)
+            + "."
+        )
     by_key: dict[tuple[str, int, str], dict[str, Any]] = {}
     candidates: set[tuple[str, str, str]] = set()
     band_by_column = {str(band["column"]): band for band in bands}
@@ -328,7 +337,7 @@ def build_band_plans(
     return plans, blocked
 
 
-def apply_plans(worksheet, plans, config: dict[str, Any], annotate: bool) -> list[dict[str, Any]]:
+def apply_plans(worksheet, plans, config: dict[str, Any]) -> list[dict[str, Any]]:
     groups = set(config.get("apply_groups", []))
     precision = int(config.get("rate_precision", 3))
     minimum_change = float(config.get("minimum_change_eur_day", 0.001))
@@ -372,14 +381,6 @@ def apply_plans(worksheet, plans, config: dict[str, Any], annotate: bool) -> lis
                 "reason": controlling.get("reason"),
             }
             changes.append(change)
-            if annotate:
-                cell.fill = copy(CHANGE_FILL)
-                cell.comment = Comment(
-                    f"VipCars recommendation: {original} -> {updated}. "
-                    f"Multiplier {float(plan['ratio']):.4f}; controlling check: "
-                    f"{controlling.get('location')}, {controlling.get('rental_days')} days.",
-                    "VipCars scraper",
-                )
     return changes
 
 
@@ -515,25 +516,30 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     plans, blocked = build_band_plans(recommendations, bands, rate_zones)
     worksheet_name = str(config.get("worksheet", "RateGroup Export"))
 
-    import_book, import_sheet, expanded_rows = prepare_workbook(workbook_path, worksheet_name, rate_zones)
-    validate_plan_targets(import_sheet, plans, config)
-    import_changes = apply_plans(import_sheet, plans, config, annotate=False)
-
-    report_book, report_sheet, report_expanded_rows = prepare_workbook(workbook_path, worksheet_name, rate_zones)
-    report_changes = apply_plans(report_sheet, plans, config, annotate=True)
-    if report_expanded_rows != expanded_rows or len(report_changes) != len(import_changes):
-        raise RuntimeError("Report and import workbooks diverged during generation.")
-    add_report_sheets(report_book, recommendations, report_changes, blocked, source_hash, expanded_rows)
-
+    workbook, worksheet, expanded_rows = prepare_workbook(workbook_path, worksheet_name, rate_zones)
+    validate_plan_targets(worksheet, plans, config)
+    changes = apply_plans(worksheet, plans, config)
     report_output.parent.mkdir(parents=True, exist_ok=True)
     import_output.parent.mkdir(parents=True, exist_ok=True)
-    import_book.save(import_output)
-    report_book.save(report_output)
+    workbook.save(import_output)
+
+    # Save the clean import before adding report-only annotations and sheets.
+    for change in changes:
+        cell = worksheet[change["cell"]]
+        cell.fill = copy(CHANGE_FILL)
+        cell.comment = Comment(
+            f"VipCars recommendation: {change['original_rate']} -> {change['updated_rate']}. "
+            f"Multiplier {change['adjustment_ratio']:.4f}; controlling check: "
+            f"{change['controlling_location']}, {change['controlling_duration_days']} days.",
+            "VipCars scraper",
+        )
+    add_report_sheets(workbook, recommendations, changes, blocked, source_hash, expanded_rows)
+    workbook.save(report_output)
 
     summary = {
         "source_workbook_sha256": source_hash,
         "expanded_source_row_count": expanded_rows,
-        "change_count": len(import_changes),
+        "change_count": len(changes),
         "blocked_band_count": len(blocked),
         "rate_zone_count": len(rate_zones),
         "blocked_bands": blocked,

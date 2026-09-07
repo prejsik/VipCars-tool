@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.comments import Comment
+from openpyxl.styles import Alignment, Font, PatternFill, Protection
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -144,7 +147,44 @@ def write_recommendations(path: Path) -> None:
     }), encoding="utf-8")
 
 
+def check_expansion_preserves_formatting() -> None:
+    spec = importlib.util.spec_from_file_location("vipcars_rate_updater", SCRIPT)
+    updater = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(updater)
+    sheet = Workbook().active
+    sheet.append(HEADERS)
+    for group, start, end in (("CFAR", "02/09/2026", "04/09/2026"), ("CDMR", "05/09/2026", "05/09/2026")):
+        sheet.append([group, 0, 0, start, end, None, None, None, 40, 20, 18, 17, 16])
+    sheet.row_dimensions[2].height = 24
+    sheet.row_dimensions[2].hidden = True
+    sheet.row_dimensions[3].height = 18
+    cell = sheet["J2"]
+    cell.font = Font(bold=True, color="123456")
+    cell.fill = PatternFill(fill_type="solid", fgColor="FEDCBA")
+    cell.alignment = Alignment(horizontal="right", wrap_text=True)
+    cell.protection = Protection(locked=False, hidden=True)
+    cell.number_format = "0.000"
+    cell.hyperlink = "https://www.vipcars.com/"
+    cell.comment = Comment("Source note", "Test")
+    with patch.object(sheet, "insert_rows", wraps=sheet.insert_rows) as insert:
+        assert updater.expand_pickup_ranges(sheet) == 4
+        insert.assert_called_once_with(3, 2)
+    for row in (3, 4):
+        copied = sheet.cell(row, 10)
+        assert copied.value == cell.value and copied._style == cell._style
+        assert copied._style is not cell._style
+        assert copied.comment.text == cell.comment.text
+        assert copied.hyperlink.target == cell.hyperlink.target
+        assert sheet.row_dimensions[row].height == 24
+        assert sheet.row_dimensions[row].hidden is True
+    assert [sheet.cell(row, 4).value for row in range(2, 6)] == [f"0{day}/09/2026" for day in range(2, 6)]
+    assert sheet["A5"].value == "CDMR"
+    assert sheet.row_dimensions[5].height == 18
+    assert sheet.row_dimensions[5].hidden is False
+
+
 def main() -> None:
+    check_expansion_preserves_formatting()
     with tempfile.TemporaryDirectory(prefix="vipcars-rate-updater-") as raw_temp:
         temp = Path(raw_temp)
         workbook_path = temp / "input.xlsx"
@@ -215,6 +255,20 @@ def main() -> None:
             "RateGroup Export", "Changed Positions", "Recommendations Review", "Validation"
         ]
         assert report_book["Changed Positions"].max_row == 5
+        report_sheet = report_book["RateGroup Export"]
+        assert list(report_sheet.values) == list(import_sheet.values)
+        assert all(cell.comment is None for row in import_sheet for cell in row)
+        changed_cells = {
+            row[1] for row in report_book["Changed Positions"].iter_rows(min_row=2, values_only=True)
+        }
+        annotated_cells = {
+            cell.coordinate for row in report_sheet for cell in row if cell.comment is not None
+        }
+        assert annotated_cells == changed_cells
+        for address in changed_cells:
+            assert report_sheet[address].fill.fgColor.rgb == "00FFF2CC"
+            assert import_sheet[address].fill != report_sheet[address].fill
+            assert report_sheet[address].comment.author == "VipCars scraper"
         assert report_book["Recommendations Review"].max_row == 11
         review_headers = [cell.value for cell in report_book["Recommendations Review"][1]]
         assert "Pay Now EUR" in review_headers
@@ -276,6 +330,30 @@ def main() -> None:
         ).lower()
         assert not partial_run_report.exists()
         assert not partial_run_import.exists()
+
+        incomplete_decisions = json.loads(recommendations_path.read_text(encoding="utf-8"))
+        incomplete_decisions["decisions"] = [
+            item for item in incomplete_decisions["decisions"]
+            if item["location"] == "Krakow"
+        ]
+        incomplete_decisions_path = temp / "incomplete-decisions.json"
+        incomplete_decisions_path.write_text(json.dumps(incomplete_decisions), encoding="utf-8")
+        incomplete_decisions_report = temp / "incomplete-decisions-report.xlsx"
+        incomplete_decisions_import = temp / "incomplete-decisions-import.xlsx"
+        incomplete_decisions_result = subprocess.run([
+            sys.executable, str(SCRIPT),
+            "--workbook", str(workbook_path),
+            "--recommendations", str(incomplete_decisions_path),
+            "--config", str(config_path),
+            "--report-output", str(incomplete_decisions_report),
+            "--import-output", str(incomplete_decisions_import),
+        ], cwd=ROOT, capture_output=True, text=True)
+        assert incomplete_decisions_result.returncode != 0
+        assert "decision data is missing expected locations" in (
+            incomplete_decisions_result.stderr + incomplete_decisions_result.stdout
+        ).lower()
+        assert not incomplete_decisions_report.exists()
+        assert not incomplete_decisions_import.exists()
 
         uncovered_recommendations_path = temp / "uncovered-recommendations.json"
         uncovered_recommendations_path.write_text(json.dumps({

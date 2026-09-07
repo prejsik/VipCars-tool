@@ -356,6 +356,8 @@ function buildHtmlReport(rows, generatedAt = new Date().toISOString(), coverageR
     .summary { color: var(--muted); margin-bottom: 14px; font-size: 13px; }
     .coverage-warning { color: #ffffff; background: #8f1d1d; border: 1px solid #e05a5a; padding: 8px 10px; margin-bottom: 14px; font-size: 13px; }
     .scenario { margin: 0 0 34px; padding-top: 8px; border-top: 2px solid #2d333b; overflow-x: visible; }
+    .scenario { content-visibility: auto; contain-intrinsic-size: auto 600px; }
+    @media print { .scenario { content-visibility: visible; contain-intrinsic-size: none; } }
     h2 { margin: 0 0 4px; font-size: 16px; font-weight: 700; }
     .period { color: var(--text); margin-bottom: 8px; font-size: 14px; }
     table { width: 100%; border-collapse: collapse; background: #0d0f12; border: 2px solid var(--line); table-layout: fixed; }
