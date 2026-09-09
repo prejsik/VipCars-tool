@@ -17,7 +17,7 @@ class VipCarsScraper {
     this.config = config;
   }
 
-  async run() {
+  async run(onProgress) {
     ensureDir(this.config.artifactsDir);
     const browser = await chromium.launch({ headless: this.config.headless });
     const results = [];
@@ -39,6 +39,9 @@ class VipCarsScraper {
           failures.push({ location, error: outcome.error.message });
           checks.push({ location, status: "incomplete", resultCount: 0, error: outcome.error.message });
           console.log(`ERR ${location} -> ${outcome.error.message}`);
+        }
+        if (onProgress) {
+          await onProgress(results, checks);
         }
       }
     } finally {

@@ -4,9 +4,9 @@ const { loadConfig, printHelp } = require("./config");
 const { applyScenarioChecks, createCoveragePlan, toCoverageCsv } = require("./coverage");
 const { addDaysToIsoDate, toCsv, writeTextFile } = require("./utils");
 
-async function main() {
+async function main(argv = process.argv.slice(2)) {
   try {
-    const config = loadConfig(process.argv.slice(2));
+    const config = loadConfig(argv);
     if (config.help) {
       printHelp();
       return;
@@ -38,7 +38,11 @@ async function main() {
         };
         console.log(`Scenario: ${scenarioConfig.pickupDate} -> ${scenarioConfig.dropoffDate} (${durationDays} days)`);
         const scraper = new VipCarsScraper(scenarioConfig);
-        const { results, failures, checks } = await scraper.run();
+        const { results, failures, checks } = await scraper.run((results, checks) => {
+          applyScenarioChecks(coverageRows, pickupDate, durationDays, checks);
+          writeTextFile(config.outputCsv, toCsv([...allResults, ...results]));
+          writeTextFile(config.outputCoverage, toCoverageCsv(coverageRows));
+        });
         allResults.push(...results);
         allFailures.push(...failures.map((failure) => ({ ...failure, pickupDate, durationDays })));
         applyScenarioChecks(coverageRows, pickupDate, durationDays, checks);
@@ -86,4 +90,8 @@ function printSummary(results, failures) {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = { main };

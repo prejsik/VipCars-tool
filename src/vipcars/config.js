@@ -238,7 +238,12 @@ function loadConfig(argv) {
     cli.pickupChunkTotal ?? cli["pickup-chunk-total"],
     "pickupChunkTotal"
   ) || 1;
-  const allPickupDateOptions = rollingPickupDays
+  const pinnedDates = cli["pickup-dates"] === undefined ? [] : uniqueStrings(splitList(cli["pickup-dates"]));
+  if (cli["pickup-dates"] !== undefined && !pinnedDates.length) {
+    throw new Error("pickup-dates must contain at least one date.");
+  }
+  pinnedDates.forEach((date) => parseDate(date, "pickup-dates"));
+  const allPickupDateOptions = pinnedDates.length ? pinnedDates.sort() : rollingPickupDays
     ? rollingDateOptionsFromNow(rollingPickupDays, pickupTime)
     : pickupWeekdays.length
     ? [...new Set(pickupWeekdays)].map((weekday) => nearestWeekdayDateFromNow(weekday, pickupTime)).sort()
@@ -299,6 +304,7 @@ Options:
   --location TEXT
   --locations "A,B,C"
   --pickup-date YYYY-MM-DD
+  --pickup-dates "YYYY-MM-DD,YYYY-MM-DD"
   --pickup-time HH:MM
   --dropoff-date YYYY-MM-DD
   --dropoff-time HH:MM

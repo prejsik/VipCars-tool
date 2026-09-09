@@ -7,6 +7,20 @@ function isMmCarsProvider(provider) {
   return String(provider || "").trim().toLowerCase().includes("mm cars rental");
 }
 
+function buildRunStatus(coverageRows, scrapeResult = "success") {
+  const complete = coverageRows.filter((row) => row.status === "complete").length;
+  const errors = coverageRows.filter((row) => row.status === "incomplete");
+  const pending = coverageRows.length - complete - errors.length;
+  const timeouts = errors.filter((row) => /timeout/i.test(row.error || "")).length;
+  if (!coverageRows.length) {
+    return "czesciowy; brak danych kontroli";
+  }
+  const status = errors.length || pending ? "czesciowy"
+    : scrapeResult === "success" ? "gotowy" : "wymaga sprawdzenia";
+  return `${status}; kompletne kontrole: ${complete}/${coverageRows.length}; `
+    + `bledy: ${errors.length} (timeout: ${timeouts}); niedokonczone: ${pending}; GitHub: ${scrapeResult}`;
+}
+
 function classifyStartDatesWithoutMm(rows, coverageRows) {
   const mmPickupDates = new Set(
     rows
@@ -70,15 +84,22 @@ function buildAlertFromFiles(csvPath, coveragePath) {
 }
 
 if (require.main === module) {
-  const csvPath = process.argv[2] || "output/vipcars-results.csv";
-  const coveragePath = process.argv[3] || "output/vipcars-coverage.csv";
-  const alert = buildAlertFromFiles(csvPath, coveragePath);
-  if (alert) {
-    process.stdout.write(`${alert}\n`);
+  if (process.argv[2] === "--status") {
+    const coveragePath = process.argv[3];
+    const coverage = fs.existsSync(coveragePath) ? parseCsv(fs.readFileSync(coveragePath, "utf8")) : [];
+    process.stdout.write(`${buildRunStatus(coverage, process.argv[4])}\n`);
+  } else {
+    const csvPath = process.argv[2] || "output/vipcars-results.csv";
+    const coveragePath = process.argv[3] || "output/vipcars-coverage.csv";
+    const alert = buildAlertFromFiles(csvPath, coveragePath);
+    if (alert) {
+      process.stdout.write(`${alert}\n`);
+    }
   }
 }
 
 module.exports = {
+  buildRunStatus,
   buildAlertFromFiles,
   buildMissingMmStartDateAlert,
   classifyStartDatesWithoutMm

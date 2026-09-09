@@ -6,7 +6,9 @@ function pickupCount(argv = process.argv.slice(2)) {
 
 if (require.main === module) {
   try {
-    console.log(pickupCount());
+    const argv = process.argv.slice(2);
+    const dates = loadConfig(argv.filter((arg) => arg !== "--dates")).pickupDateOptions;
+    console.log(argv.includes("--dates") ? dates.join(",") : dates.length);
   } catch (error) {
     console.error(error.message || error);
     process.exitCode = 1;
