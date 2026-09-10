@@ -52,6 +52,35 @@ async function main(argv = process.argv.slice(2)) {
       }
     }
 
+    if (allFailures.length) {
+      const failedChecks = allFailures.splice(0, allFailures.length);
+      console.log(`Recovery pass: retrying ${failedChecks.length} incomplete check(s) after the initial scan.`);
+
+      for (const failedCheck of failedChecks) {
+        const { pickupDate, durationDays, location } = failedCheck;
+        const scenarioConfig = {
+          ...config,
+          locations: [location],
+          pickupDate,
+          dropoffDate: addDaysToIsoDate(pickupDate, durationDays),
+          currentDurationDays: durationDays
+        };
+        console.log(`Recovery: ${pickupDate}, ${durationDays} days, ${location}`);
+        const scraper = new VipCarsScraper(scenarioConfig);
+        const { results, failures, checks } = await scraper.run((recoveryResults, recoveryChecks) => {
+          applyScenarioChecks(coverageRows, pickupDate, durationDays, recoveryChecks);
+          writeTextFile(config.outputCsv, toCsv([...allResults, ...recoveryResults]));
+          writeTextFile(config.outputCoverage, toCoverageCsv(coverageRows));
+        });
+        allResults.push(...results);
+        allFailures.push(...failures.map((failure) => ({ ...failure, pickupDate, durationDays })));
+        applyScenarioChecks(coverageRows, pickupDate, durationDays, checks);
+        writeTextFile(config.outputCsv, toCsv(allResults));
+        writeTextFile(config.outputCoverage, toCoverageCsv(coverageRows));
+      }
+      console.log("");
+    }
+
     printSummary(allResults, allFailures);
     writeTextFile(config.outputCsv, toCsv(allResults));
     console.log(`CSV saved to: ${config.outputCsv}`);

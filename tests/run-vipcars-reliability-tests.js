@@ -102,13 +102,13 @@ async function main() {
     await runCli(["--config", configPath, "--durations-days", "2,3"]);
     const savedRows = parseCsv(fs.readFileSync(resultsPath, "utf8"));
     const savedCoverage = parseCsv(fs.readFileSync(coveragePath, "utf8"));
-    assert.equal(calls, 4);
-    assert.equal(savedRows.length, 3);
-    assert.equal(new Set(savedRows.map((row) => `${row.location}|${row.duration_days}`)).size, 3);
-    assert.equal(savedCoverage.filter((row) => row.status === "complete").length, 3);
-    assert.equal(savedCoverage.filter((row) => row.status === "incomplete").length, 1);
-    assert.equal(process.exitCode, 1);
-    console.log("PASS checkpoint data is not duplicated and failed checks stay incomplete");
+    assert.equal(calls, 5);
+    assert.equal(savedRows.length, 4);
+    assert.equal(new Set(savedRows.map((row) => `${row.location}|${row.duration_days}`)).size, 4);
+    assert.equal(savedCoverage.filter((row) => row.status === "complete").length, 4);
+    assert.equal(savedCoverage.filter((row) => row.status === "incomplete").length, 0);
+    assert.equal(process.exitCode, undefined);
+    console.log("PASS delayed recovery completes a transient failed check without duplicate data");
   } finally {
     chromium.launch = originalLaunch;
     VipCarsScraper.prototype.runLocationWithRetries = originalLocation;

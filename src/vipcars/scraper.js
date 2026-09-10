@@ -11,6 +11,7 @@ const {
 } = require("./utils");
 
 const MAX_TIMEOUT_RETRIES = 2;
+const NO_RESULTS_SELECTOR = '.notFoundImg img[alt="No Results Found"]';
 
 class VipCarsScraper {
   constructor(config) {
@@ -88,7 +89,11 @@ class VipCarsScraper {
       console.log(`    Search location: ${resolvedLocation.name} (${resolvedLocation.code || resolvedLocation.locationId})`);
       console.log(`    Search time: ${this.config.pickupTime} -> ${this.config.dropoffTime}`);
       await page.goto(this.buildSearchUrl(location), { waitUntil: "domcontentloaded" });
-      await page.waitForSelector(".scv-car-box", { timeout: this.config.timeoutMs });
+      const searchOutcome = await this.waitForSearchOutcome(page);
+      if (searchOutcome === "no-results") {
+        console.log("    VipCars returned no available cars for this date/time.");
+        return { ok: true, cheapest: null, results: [] };
+      }
       await this.applyAutomaticTransmissionFilter(page);
       await this.loadSearchResultCards(page);
       const offers = await this.extractSearchOffers(page, location);
@@ -104,6 +109,13 @@ class VipCarsScraper {
     } finally {
       await context.close();
     }
+  }
+
+  async waitForSearchOutcome(page) {
+    await page.waitForSelector(`.scv-car-box, ${NO_RESULTS_SELECTOR}`, {
+      timeout: this.config.timeoutMs
+    });
+    return await page.locator(".scv-car-box").count() > 0 ? "results" : "no-results";
   }
 
   buildSearchUrl(location) {
