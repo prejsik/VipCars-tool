@@ -41,6 +41,14 @@ on:
         description: "VipCars display currency"
         required: true
         default: "EUR"
+      vehicle_category:
+        description: "Optional one-off category: van or luxury_premium"
+        required: false
+        default: ""
+      transmission:
+        description: "Transmission filter: automatic or any"
+        required: true
+        default: "automatic"
 
 permissions:
   contents: read
@@ -54,11 +62,13 @@ env:
   SCHEDULE_PICKUP_ROLLING_DAYS: "60"
   SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10,11,12,13,14"
   SCHEDULE_CURRENCY: "EUR"
+  SCHEDULE_TRANSMISSION: "automatic"
   PUSH_TEST_LOCATIONS: "Warsaw"
   PUSH_TEST_PICKUP_WEEKDAYS: "friday"
   PUSH_TEST_PICKUP_ROLLING_DAYS: ""
   PUSH_TEST_DURATIONS: "2"
   PUSH_TEST_CURRENCY: "EUR"
+  PUSH_TEST_TRANSMISSION: "automatic"
   SCHEDULE_CHUNK_COUNT: "60"
 
 jobs:
@@ -72,6 +82,8 @@ jobs:
       pickup_rolling_days: ${{ steps.options.outputs.pickup_rolling_days }}
       durations: ${{ steps.options.outputs.durations }}
       currency: ${{ steps.options.outputs.currency }}
+      vehicle_category: ${{ steps.options.outputs.vehicle_category }}
+      transmission: ${{ steps.options.outputs.transmission }}
       pickup_count: ${{ steps.options.outputs.pickup_count }}
       pickup_dates: ${{ steps.options.outputs.pickup_dates }}
       chunk_total: ${{ steps.options.outputs.chunk_total }}
@@ -114,6 +126,8 @@ jobs:
           INPUT_PICKUP_ROLLING_DAYS: ${{ inputs.pickup_rolling_days }}
           INPUT_DURATIONS: ${{ inputs.durations }}
           INPUT_CURRENCY: ${{ inputs.currency }}
+          INPUT_VEHICLE_CATEGORY: ${{ inputs.vehicle_category }}
+          INPUT_TRANSMISSION: ${{ inputs.transmission }}
         run: |
           if [[ "${{ github.event_name }}" == "push" ]]; then
             default_locations="$PUSH_TEST_LOCATIONS"
@@ -121,6 +135,7 @@ jobs:
             default_pickup_rolling_days="$PUSH_TEST_PICKUP_ROLLING_DAYS"
             default_durations="$PUSH_TEST_DURATIONS"
             default_currency="$PUSH_TEST_CURRENCY"
+            default_transmission="$PUSH_TEST_TRANSMISSION"
             chunk_total="1"
           else
             default_locations="$SCHEDULE_LOCATIONS"
@@ -128,6 +143,7 @@ jobs:
             default_pickup_rolling_days="$SCHEDULE_PICKUP_ROLLING_DAYS"
             default_durations="$SCHEDULE_DURATIONS"
             default_currency="$SCHEDULE_CURRENCY"
+            default_transmission="$SCHEDULE_TRANSMISSION"
             chunk_total="${SCHEDULE_CHUNK_COUNT:-3}"
           fi
 
@@ -136,6 +152,8 @@ jobs:
           pickup_rolling_days="${INPUT_PICKUP_ROLLING_DAYS:-$default_pickup_rolling_days}"
           durations="${INPUT_DURATIONS:-$default_durations}"
           currency="${INPUT_CURRENCY:-$default_currency}"
+          vehicle_category="$INPUT_VEHICLE_CATEGORY"
+          transmission="${INPUT_TRANSMISSION:-$default_transmission}"
 
           plan_command=(node src/vipcars/pickupPlan.js --dates \
             --config vipcars.config.example.json \
@@ -146,6 +164,10 @@ jobs:
           elif [[ -n "$pickup_weekdays" ]]; then
             plan_command+=(--pickup-weekdays "$pickup_weekdays")
           fi
+          if [[ -n "$vehicle_category" ]]; then
+            plan_command+=(--vehicle-category "$vehicle_category")
+          fi
+          plan_command+=(--transmission "$transmission")
           pickup_dates="$("${plan_command[@]}")"
           IFS=',' read -ra planned_dates <<< "$pickup_dates"
           pickup_count="${#planned_dates[@]}"
@@ -168,6 +190,8 @@ jobs:
           echo "pickup_rolling_days=$pickup_rolling_days" >> "$GITHUB_OUTPUT"
           echo "durations=$durations" >> "$GITHUB_OUTPUT"
           echo "currency=$currency" >> "$GITHUB_OUTPUT"
+          echo "vehicle_category=$vehicle_category" >> "$GITHUB_OUTPUT"
+          echo "transmission=$transmission" >> "$GITHUB_OUTPUT"
           echo "pickup_count=$pickup_count" >> "$GITHUB_OUTPUT"
           echo "pickup_dates=$pickup_dates" >> "$GITHUB_OUTPUT"
           echo "chunk_total=$chunk_total" >> "$GITHUB_OUTPUT"
@@ -239,6 +263,8 @@ jobs:
           PICKUP_ROLLING_DAYS: ${{ needs.prepare.outputs.pickup_rolling_days }}
           DURATIONS: ${{ needs.prepare.outputs.durations }}
           CURRENCY: ${{ needs.prepare.outputs.currency }}
+          VEHICLE_CATEGORY: ${{ needs.prepare.outputs.vehicle_category }}
+          TRANSMISSION: ${{ needs.prepare.outputs.transmission }}
           CHUNK_INDEX: ${{ matrix.chunk }}
           CHUNK_TOTAL: ${{ needs.prepare.outputs.chunk_total }}
           PICKUP_DATES: ${{ needs.prepare.outputs.pickup_dates }}
@@ -252,6 +278,7 @@ jobs:
             --locations "$LOCATIONS" \
             --durations-days "$DURATIONS" \
             --currency "$CURRENCY" \
+            --transmission "$TRANSMISSION" \
             --pickup-dates "$PICKUP_DATES" \
             --timeout-ms 45000 \
             --artifacts-dir "artifacts/vipcars/chunk-${CHUNK_INDEX}" \
@@ -262,6 +289,10 @@ jobs:
             command+=(--pickup-rolling-days "$PICKUP_ROLLING_DAYS")
           elif [[ -n "$PICKUP_WEEKDAYS" ]]; then
             command+=(--pickup-weekdays "$PICKUP_WEEKDAYS")
+          fi
+
+          if [[ -n "$VEHICLE_CATEGORY" ]]; then
+            command+=(--vehicle-category "$VEHICLE_CATEGORY")
           fi
 
           if [[ "$CHUNK_TOTAL" != "1" ]]; then
@@ -292,7 +323,7 @@ jobs:
       - prepare
       - test
       - scrape
-    if: always() && needs.prepare.outputs.should_run == 'true' && github.event_name != 'push'
+    if: always() && needs.prepare.outputs.should_run == 'true' && github.event_name != 'push' && needs.prepare.outputs.vehicle_category == ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:

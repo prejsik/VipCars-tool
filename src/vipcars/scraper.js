@@ -1,5 +1,6 @@
 const path = require("path");
 const { chromium } = require("playwright");
+const { normalizeVehicleCategory } = require("./config");
 const {
   ensureDir,
   formatMoney,
@@ -94,7 +95,9 @@ class VipCarsScraper {
         console.log("    VipCars returned no available cars for this date/time.");
         return { ok: true, cheapest: null, results: [] };
       }
-      await this.applyAutomaticTransmissionFilter(page);
+      if (this.config.transmission !== "any") {
+        await this.applyAutomaticTransmissionFilter(page);
+      }
       await this.loadSearchResultCards(page);
       const offers = await this.extractSearchOffers(page, location);
       if (!offers.length) {
@@ -283,7 +286,8 @@ class VipCarsScraper {
           .find((text) => /transmission/i.test(text)) || "");
         const automatic = Boolean(card.querySelector(".scv-car-specs .scv-icon.autom")) ||
           /\bautomatic\b/i.test(`${transmission} ${carName}`);
-        return { provider, rating, priceText, payNowText, location: defaultLocation, carName, transmission, automatic };
+        const vehicleCategory = normalize(card.querySelector(".scv-car-cat")?.textContent || "");
+        return { provider, rating, priceText, payNowText, location: defaultLocation, carName, transmission, automatic, vehicleCategory };
       });
     }, fallbackLocation);
 
@@ -291,7 +295,9 @@ class VipCarsScraper {
     const desiredCurrency = this.getCurrency();
     for (const candidate of raw) {
       const money = parseMoney(candidate.priceText);
-      if (!candidate.provider || !money || !isAutomaticTransmissionCandidate(candidate)) {
+      const requiresAutomatic = (this.config.transmission || "automatic") !== "any";
+      if (!candidate.provider || !money || (requiresAutomatic && !isAutomaticTransmissionCandidate(candidate)) ||
+          !isVehicleCategoryCandidate(candidate.vehicleCategory, this.config.vehicleCategory)) {
         continue;
       }
       const currency = normalizeCurrency(money.currency || desiredCurrency);
@@ -410,6 +416,17 @@ function isAutomaticTransmissionCandidate(candidate) {
   return /\bautomatic\b/i.test(text);
 }
 
+function isVehicleCategoryCandidate(categoryText, desiredCategory) {
+  const category = normalizeVehicleCategory(desiredCategory);
+  if (!category) {
+    return true;
+  }
+  const text = normalizeWhitespace(categoryText).toLowerCase();
+  return category === "van"
+    ? /\bvan\b|\bminivan\b/.test(text)
+    : /\bluxury\b|\bpremium\b/.test(text);
+}
+
 function isTimeoutError(error) {
   if (error?.name === "TimeoutError") {
     return true;
@@ -429,6 +446,7 @@ function slugifyLocation(value) {
 module.exports = {
   VipCarsScraper,
   isAutomaticTransmissionCandidate,
+  isVehicleCategoryCandidate,
   resolveVipCarsLocation,
   slugifyLocation
 };

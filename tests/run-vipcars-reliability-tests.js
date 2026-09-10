@@ -34,6 +34,12 @@ async function main() {
   assert.match(workflow, /--pickup-dates "\$PICKUP_DATES"/);
   console.log("PASS queued jobs retain the prepared pickup dates");
 
+  assert.match(workflow, /vehicle_category:/);
+  assert.match(workflow, /command\+=\(--vehicle-category "\$VEHICLE_CATEGORY"\)/);
+  assert.match(workflow, /--transmission "\$TRANSMISSION"/);
+  assert.match(workflow, /needs\.prepare\.outputs\.vehicle_category == ''/);
+  console.log("PASS one-off category runs do not replace the daily Pages report");
+
   const status = buildRunStatus([
     { status: "complete" }, { status: "complete" },
     { status: "incomplete", error: "Timeout 45000ms exceeded." }, { status: "pending" }

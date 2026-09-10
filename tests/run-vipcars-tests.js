@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const { loadConfig } = require("../src/vipcars/config");
+const { loadConfig, normalizeVehicleCategory } = require("../src/vipcars/config");
 const { mergeCoverageFiles } = require("../src/vipcars/coverage");
 const { mergeCsvFiles } = require("../src/vipcars/mergeCsv");
 const { parseMoney, toCsv } = require("../src/vipcars/utils");
@@ -12,6 +12,7 @@ const { buildHtmlReport, parseCsv } = require("../src/vipcars/reportHtml");
 const {
   VipCarsScraper,
   isAutomaticTransmissionCandidate,
+  isVehicleCategoryCandidate,
   resolveVipCarsLocation,
   slugifyLocation
 } = require("../src/vipcars/scraper");
@@ -162,6 +163,16 @@ runTest("CLI locations override config defaults", () => {
   assert.deepEqual(config.locations, ["Katowice"]);
 });
 
+runTest("CLI accepts the requested VipCars vehicle categories", () => {
+  const baseArgs = ["--config", path.join(__dirname, "..", "vipcars.config.example.json")];
+  assert.equal(loadConfig([...baseArgs, "--vehicle-category", "Van/Minivan"]).vehicleCategory, "van");
+  assert.equal(loadConfig([...baseArgs, "--vehicle-category", "premium"]).vehicleCategory, "luxury_premium");
+  assert.throws(() => loadConfig([...baseArgs, "--vehicle-category", "suv"]), /vehicle category/i);
+  assert.equal(loadConfig([...baseArgs, "--transmission", "any"]).transmission, "any");
+  assert.equal(loadConfig(baseArgs).transmission, "automatic");
+  assert.throws(() => loadConfig([...baseArgs, "--transmission", "semi"]), /transmission/i);
+});
+
 runTest("CLI output paths override config defaults", () => {
   const config = loadConfig([
     "--config", "vipcars.config.example.json",
@@ -239,6 +250,14 @@ runTest("VipCars offers require automatic transmission", () => {
   }), true);
 });
 
+runTest("VipCars matches Van/Minivan and Luxury/Premium cards", () => {
+  assert.equal(normalizeVehicleCategory("bus"), "van");
+  assert.equal(normalizeVehicleCategory("Luxury/Premium"), "luxury_premium");
+  assert.equal(isVehicleCategoryCandidate("Van/Minivan", "van"), true);
+  assert.equal(isVehicleCategoryCandidate("Luxury/Premium", "luxury_premium"), true);
+  assert.equal(isVehicleCategoryCandidate("Compact", "van"), false);
+});
+
 runTest("CSV and HTML report render top offers", () => {
   const csv = toCsv([
     {
@@ -311,6 +330,36 @@ runAsyncTest("VipCars extracts Pay Now from the same offer card", async () => {
   assert.equal(offers[0].pay_now_amount, 4.32);
   assert.equal(offers[0].pay_now_currency, "EUR");
   assert.match(toCsv(offers).split("\n")[0], /pay_now_amount,pay_now_currency/);
+});
+
+runAsyncTest("VipCars extraction keeps only the requested vehicle category", async () => {
+  const scraper = new VipCarsScraper({
+    currency: "EUR",
+    vehicleCategory: "van",
+    transmission: "any",
+    currentDurationDays: 2,
+    pickupDate: "2026-09-11",
+    dropoffDate: "2026-09-13"
+  });
+  const candidate = {
+    rating: "9.0",
+    priceText: "EUR 100.00",
+    payNowText: "",
+    location: "Warsaw",
+    carName: "Automatic or similar",
+    transmission: "Automatic",
+    automatic: true
+  };
+  const page = {
+    evaluate: async () => [
+      { ...candidate, provider: "Van Supplier", vehicleCategory: "Van/Minivan" },
+      { ...candidate, provider: "Manual Van Supplier", vehicleCategory: "Van/Minivan", automatic: false, transmission: "Manual" },
+      { ...candidate, provider: "Premium Supplier", vehicleCategory: "Luxury/Premium" }
+    ]
+  };
+
+  const offers = await scraper.extractSearchOffers(page, "Warsaw");
+  assert.deepEqual(offers.map((offer) => offer.provider), ["Van Supplier", "Manual Van Supplier"]);
 });
 
 runTest("mergeCsvFiles combines chunk result files", () => {

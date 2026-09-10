@@ -92,6 +92,31 @@ function parseOptionalPositiveInteger(rawValue, fieldName) {
   return parsed;
 }
 
+function normalizeVehicleCategory(rawValue) {
+  const normalized = normalizeWhitespace(rawValue).toLowerCase().replace(/[\s/-]+/g, "_");
+  if (!normalized) {
+    return "";
+  }
+  if (["van", "minivan", "van_minivan", "bus", "buses"].includes(normalized)) {
+    return "van";
+  }
+  if (["luxury", "premium", "luxury_premium"].includes(normalized)) {
+    return "luxury_premium";
+  }
+  throw new Error(`Unsupported vehicle category: ${rawValue}. Use van or luxury_premium.`);
+}
+
+function normalizeTransmission(rawValue) {
+  const normalized = normalizeWhitespace(rawValue || "automatic").toLowerCase();
+  if (["automatic", "auto"].includes(normalized)) {
+    return "automatic";
+  }
+  if (["any", "all", "dowolna"].includes(normalized)) {
+    return "any";
+  }
+  throw new Error(`Unsupported transmission: ${rawValue}. Use automatic or any.`);
+}
+
 function parsePickupWeekdaysInput(rawValue, fieldName) {
   if (rawValue == null) {
     return [];
@@ -253,6 +278,8 @@ function loadConfig(argv) {
   return {
     baseUrl: normalizeWhitespace(merged.baseUrl || "https://www.vipcars.com"),
     currency: normalizeWhitespace(merged.currency || "EUR").toUpperCase(),
+    vehicleCategory: normalizeVehicleCategory(merged.vehicleCategory ?? merged["vehicle-category"]),
+    transmission: normalizeTransmission(merged.transmission),
     locations,
     pickupDate,
     pickupDateOptions,
@@ -309,6 +336,8 @@ Options:
   --dropoff-date YYYY-MM-DD
   --dropoff-time HH:MM
   --currency EUR
+  --vehicle-category van|luxury_premium
+  --transmission automatic|any
   --pickup-rolling-days 30
   --pickup-chunk-index 1
   --pickup-chunk-total 3
@@ -321,4 +350,4 @@ Options:
 `);
 }
 
-module.exports = { loadConfig, printHelp };
+module.exports = { loadConfig, normalizeVehicleCategory, printHelp };

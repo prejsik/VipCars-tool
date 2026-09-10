@@ -14,6 +14,10 @@ async function main(argv = process.argv.slice(2)) {
 
     console.log("VipCars scraper started");
     console.log(`Locations: ${config.locations.join(", ")}`);
+    if (config.vehicleCategory) {
+      console.log(`Vehicle category: ${config.vehicleCategory}`);
+    }
+    console.log(`Transmission: ${config.transmission}`);
     console.log(`Pickup options: ${config.pickupDateOptions.join(", ")} ${config.pickupTime}`);
     console.log(`Durations (days): ${config.durationDays.join(", ")}`);
     if (config.pickupChunkTotal > 1) {
