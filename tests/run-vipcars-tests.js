@@ -549,12 +549,52 @@ runTest("HTML report marks incomplete coverage", () => {
   assert.match(html, /kontrole planowane: 2 \| z ofertami: 1 \| bez ofert: 0 \| niepełne: 1/);
 });
 
-runTest("schedule gate selects exactly one cron on DST transition dates", () => {
-  const { selectScheduleForWarsawDate } = require("../src/vipcars/scheduleGate");
-  assert.equal(selectScheduleForWarsawDate("2026-01-15"), "30 1 * * *");
-  assert.equal(selectScheduleForWarsawDate("2026-07-15"), "30 0 * * *");
-  assert.equal(selectScheduleForWarsawDate("2026-03-29"), "30 1 * * *");
-  assert.equal(selectScheduleForWarsawDate("2026-10-25"), "30 1 * * *");
+runTest("daily schedule leaves time for observed delays before 07:00 Warsaw", () => {
+  const workflow = fs.readFileSync(path.join(__dirname, "../.github/workflows/vipcars-daily.yml"), "utf8");
+  const schedules = [...workflow.matchAll(/- cron: "(\d+) (\d+) \* \* \*"/g)];
+  assert.equal(schedules.length, 1, "Use one daily schedule, including on DST transitions");
+  assert.match(workflow, /timezone: "Europe\/Warsaw"/);
+  assert.doesNotMatch(workflow, /scheduleGate|steps\.gate/);
+  const startMinutes = Number(schedules[0][2]) * 60 + Number(schedules[0][1]);
+  // Sep 11-15, 2026: worst scheduler delay 284 min, full scan 307 min.
+  const estimatedFinish = startMinutes + 284 + 307 + 30 + 60;
+  assert.ok(startMinutes >= 12 * 60, "Prepare the morning report the previous evening");
+  assert.ok(estimatedFinish <= (24 + 7) * 60,
+    "Leave a 30-minute margin before 07:00 after observed delays and the spring DST lost hour");
+});
+
+runTest("evening and delayed overnight runs retain the same 60 pickup dates", () => {
+  const cases = [
+    ["2026-09-15T19:17:00+02:00", "2026-09-16T00:01:00+02:00", "2026-09-16"],
+    ["2026-01-15T19:17:00+01:00", "2026-01-16T00:01:00+01:00", "2026-01-16"],
+    ["2026-03-28T19:17:00+01:00", "2026-03-29T04:01:00+02:00", "2026-03-29"],
+    ["2026-10-24T19:17:00+02:00", "2026-10-25T04:01:00+01:00", "2026-10-25"],
+    ["2026-12-31T19:17:00+01:00", "2027-01-01T00:01:00+01:00", "2027-01-01"]
+  ];
+  for (const [evening, delayed, expectedFirstDate] of cases) {
+    const plans = [evening, delayed].map((instant) => {
+      const child = spawnSync(process.execPath, ["-e", `
+        const RealDate = Date;
+        global.Date = class extends RealDate {
+          constructor(...args) { super(...(args.length ? args : [process.env.TEST_INSTANT])); }
+        };
+        const config = require('./src/vipcars/config').loadConfig([
+          '--config', 'vipcars.config.example.json', '--pickup-rolling-days', '60'
+        ]);
+        console.log(JSON.stringify(config.pickupDateOptions));
+      `], {
+        cwd: path.join(__dirname, ".."), encoding: "utf8",
+        env: { ...process.env, TZ: "Europe/Warsaw", TEST_INSTANT: instant }
+      });
+      assert.equal(child.status, 0, child.stderr);
+      return JSON.parse(child.stdout);
+    });
+    assert.deepEqual(plans[0], plans[1]);
+    assert.equal(plans[0][0], expectedFirstDate);
+    assert.equal(plans[0].length, 60);
+    assert.equal(new Set(plans[0]).size, 60);
+    assert.equal(Date.parse(plans[0][59]) - Date.parse(plans[0][0]), 59 * 86400000);
+  }
 });
 
 runTest("HTML report applies all MM highlight colors", () => {

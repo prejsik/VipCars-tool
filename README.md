@@ -35,7 +35,11 @@ Recommendations and import rows are separated by the VipCars rate zones configur
 
 ## Scheduled scenarios
 
-The daily schedule checks 60 rolling pickup dates from the run date and rental durations from 2 to 14 days.
+The daily schedule starts at **19:17 Europe/Warsaw the previous evening** to prepare the next morning's report before 07:00. GitHub handles summer/winter time through the workflow's `timezone` setting; there is one scheduled run per day.
+
+On September 11-15, 2026, GitHub delivered the old 02:30 trigger about 4 hours 19 minutes to 4 hours 44 minutes late, and the full run then took about 4 hours 8 minutes to 5 hours 7 minutes. Telegram itself took about one second. The earlier start allows for these observed delays, a 30-minute margin, and the hour lost on the spring DST transition. GitHub schedules are best-effort, so this is a delivery target, not a guaranteed deadline. Telegram is sent as soon as the report is published, which may be during the night.
+
+The daily scan still checks all seven locations, 60 rolling pickup dates and rental durations from 2 to 14 days, in EUR with automatic transmission. Since pickup is at 10:00, an evening run starts its pickup plan on the following day; a run delayed past midnight keeps that same first date until 10:00. The plan is fixed in the prepare job and shared by all 60 chunks. An evening start means prices may be collected the previous evening or during the night.
 
 ## Telegram notification
 

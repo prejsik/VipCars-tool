@@ -16,9 +16,9 @@ on:
       - "package.json"
       - "package-lock.json"
   schedule:
-    # Runs at 02:30 Europe/Warsaw year-round; two UTC crons handle CET/CEST.
-    - cron: "30 0 * * *"
-    - cron: "30 1 * * *"
+    # Prepare the next morning's report, allowing for scheduler and scrape delays.
+    - cron: "17 19 * * *"
+      timezone: "Europe/Warsaw"
   workflow_dispatch:
     inputs:
       locations:
@@ -76,7 +76,6 @@ jobs:
     name: Resolve VipCars run options
     runs-on: ubuntu-latest
     outputs:
-      should_run: ${{ steps.gate.outputs.should_run }}
       locations: ${{ steps.options.outputs.locations }}
       pickup_weekdays: ${{ steps.options.outputs.pickup_weekdays }}
       pickup_rolling_days: ${{ steps.options.outputs.pickup_rolling_days }}
@@ -93,31 +92,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check Warsaw schedule gate
-        id: gate
-        shell: bash
-        run: |
-          warsaw_now="$(TZ=Europe/Warsaw date '+%Y-%m-%d %H:%M:%S %Z')"
-          warsaw_date="$(TZ=Europe/Warsaw date +%F)"
-          trigger_schedule="${{ github.event.schedule }}"
-          echo "Warsaw time now: $warsaw_now"
-          echo "Schedule trigger: ${trigger_schedule:-not-scheduled}"
-
-          if [[ "${{ github.event_name }}" != "schedule" ]]; then
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          selected_schedule="$(node src/vipcars/scheduleGate.js "$warsaw_date")"
-          echo "Selected schedule for $warsaw_date: $selected_schedule"
-          if [[ "$trigger_schedule" == "$selected_schedule" ]]; then
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Resolve run options
-        if: steps.gate.outputs.should_run == 'true'
         id: options
         shell: bash
         env:
@@ -200,7 +175,6 @@ jobs:
   test:
     name: Run VipCars tests
     needs: prepare
-    if: needs.prepare.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -232,7 +206,6 @@ jobs:
     needs:
       - prepare
       - test
-    if: needs.prepare.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -323,7 +296,7 @@ jobs:
       - prepare
       - test
       - scrape
-    if: always() && needs.prepare.outputs.should_run == 'true' && github.event_name != 'push' && needs.prepare.outputs.vehicle_category == ''
+    if: always() && needs.prepare.result == 'success' && needs.test.result == 'success' && github.event_name != 'push' && needs.prepare.outputs.vehicle_category == ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:
