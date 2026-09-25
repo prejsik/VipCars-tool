@@ -347,12 +347,16 @@ jobs:
           EXPECTED_LOCATIONS: ${{ needs.prepare.outputs.locations }}
           EXPECTED_DURATIONS: ${{ needs.prepare.outputs.durations }}
           EXPECTED_PICKUP_COUNT: ${{ needs.prepare.outputs.pickup_count }}
+          TRANSMISSION: ${{ needs.prepare.outputs.transmission }}
+          VEHICLE_CATEGORY: ${{ needs.prepare.outputs.vehicle_category }}
         run: |
           command=(node src/vipcars/pricingRecommendations.js \
             output/vipcars-results.csv \
             output/vipcars-coverage.csv \
             output/vipcars-pricing-recommendations.json \
             --config=vipcars-rate-update.config.json \
+            --transmission="$TRANSMISSION" \
+            --vehicle-category="$VEHICLE_CATEGORY" \
             --expected-locations="$EXPECTED_LOCATIONS" \
             --expected-durations="$EXPECTED_DURATIONS")
           if [[ -n "$EXPECTED_PICKUP_COUNT" ]]; then

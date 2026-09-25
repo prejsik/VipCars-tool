@@ -8,6 +8,7 @@ import json
 import sys
 from copy import copy
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
 from typing import Any
 
@@ -227,11 +228,98 @@ def expand_rate_zones(worksheet, rate_zones: list[dict[str, str]]) -> int:
     return worksheet.max_row - 1
 
 
+def decimal_number(value: Any, name: str, *, positive: bool = False) -> Decimal:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"Invalid {name}: {value!r}.") from None
+    if not number.is_finite() or (positive and number <= 0):
+        raise ValueError(f"Invalid {name}: {value!r}.")
+    return number
+
+
+def validate_pricing_context(recommendations, config):
+    if recommendations.get("pricing_model") != "absolute_net_v1":
+        raise ValueError("Recommendations must use the absolute_net_v1 pricing model; regenerate legacy recommendations.")
+    if recommendations.get("transmission") != "automatic" or recommendations.get("vehicle_category"):
+        raise ValueError("Import recommendations require automatic offers without a vehicle category restriction.")
+    pricing = config["pricing"]
+    vat = decimal_number(pricing["vat_rate_percent"], "VAT")
+    undercut = decimal_number(pricing["undercut_eur_day"], "undercut", positive=True)
+    if vat < 0 or decimal_number(recommendations.get("vat_rate_percent"), "recommendation VAT") != vat:
+        raise ValueError("Recommendation VAT differs from the import configuration.")
+    if decimal_number(recommendations.get("undercut_eur_day"), "recommendation undercut") != undercut:
+        raise ValueError("Recommendation undercut differs from the import configuration.")
+    exchange = recommendations.get("exchange_rate") or {}
+    fx = decimal_number(exchange.get("pln_per_eur"), "EUR/PLN", positive=True)
+    if exchange.get("source") == "NBP":
+        parse_date(exchange.get("effective_date"))
+    elif exchange.get("source") == "fallback":
+        if fx != decimal_number(config["exchange_rate"]["fallback_pln_per_eur"], "fallback EUR/PLN", positive=True):
+            raise ValueError("Fallback EUR/PLN differs from the approved configuration.")
+    else:
+        raise ValueError("Unknown exchange rate source.")
+    return fx, 1 + vat / 100, undercut
+
+
+def duration_target(decision, config, context):
+    fx, vat_multiplier, undercut = context
+    if decision.get("currency") != "EUR":
+        raise ValueError("Expected an EUR recommendation.")
+    if decimal_number(decision.get("vat_rate_percent"), "decision VAT") != (vat_multiplier - 1) * 100:
+        raise ValueError("Decision VAT differs from the import configuration.")
+    total = decimal_number(decision.get("mm_total_eur"), "MM gross total EUR", positive=True)
+    pay_now = decimal_number(decision.get("pay_now_total_eur"), "Pay Now EUR")
+    if pay_now < 0 or pay_now >= total:
+        raise ValueError("Pay Now must be non-negative and below the MM gross total.")
+    retained = total - pay_now
+    broker = total / retained
+    declared_broker = decimal_number(decision.get("broker_markup_multiplier"), "broker multiplier", positive=True)
+    if abs(declared_broker - broker) > Decimal("0.000000000001"):
+        raise ValueError("Broker multiplier differs from the raw MM total and Pay Now.")
+    pricing = config["pricing"]
+    if not (decimal_number(pricing["min_broker_markup_multiplier"], "minimum broker") <= broker
+            <= decimal_number(pricing["max_broker_markup_multiplier"], "maximum broker")):
+        raise ValueError("Broker multiplier is outside the allowed range.")
+    floor_settings = config["minimum_rates"]
+    floor_pln = Decimal(0)
+    if parse_date(decision["pickup_date"]) <= parse_date(floor_settings["end_date"]):
+        for band in floor_settings["bands"]:
+            if int(band["min_days"]) <= int(decision["rental_days"]) <= int(band["max_days"]):
+                floor_pln = max(floor_pln, decimal_number(band["min_pln_gross_day"], "minimum gross PLN"))
+    if floor_pln < 0:
+        raise ValueError("Minimum gross PLN must not be negative.")
+    floor_net = floor_pln / (fx * vat_multiplier)
+    if (decimal_number(decision.get("minimum_supplier_gross_pln_day"), "decision minimum PLN") != floor_pln
+            or abs(decimal_number(decision.get("minimum_net_rate_eur_day"), "decision minimum EUR") - floor_net) > Decimal('0.000000001')):
+        raise ValueError("Decision minimum differs from the import configuration or exchange rate.")
+    quantum = Decimal(1).scaleb(-int(config.get("rate_precision", 3)))
+    minimum = max(quantum, floor_net.quantize(quantum, rounding=ROUND_CEILING))
+    competitors = decision.get("competitor_rates_eur_day") or []
+    if not 1 <= len(competitors) <= 3:
+        raise ValueError("Expected up to three comparable competitors.")
+    rates = [decimal_number(item.get("rate_eur_day"), "competitor EUR/day", positive=True) for item in competitors]
+    if rates != sorted(rates):
+        raise ValueError("Competitor rates must be sorted.")
+    for rank, rate in enumerate(rates, 1):
+        # Round the import cap down, but the minimum up. Never undercut the floor.
+        # Keep the raw money ratio until the last division; the multiplier may repeat.
+        cap = ((rate - undercut) * retained / (total * vat_multiplier)).quantize(quantum, rounding=ROUND_FLOOR)
+        if cap >= minimum:
+            return {"cap": cap, "minimum": minimum, "floor_pln": floor_pln,
+                    "target_rank": rank, "site_cap": rate - undercut, "rates": rates,
+                    "broker": broker, "total": total, "retained": retained,
+                    "vat_multiplier": vat_multiplier, "fx": fx, "decision": decision}
+    raise ValueError("Floor blocks top3; preserve baseline rates.")
+
+
 def build_band_plans(
     recommendations: dict[str, Any],
     bands: list[dict[str, Any]],
     rate_zones: list[dict[str, str]],
+    config: dict[str, Any],
 ) -> tuple[dict[tuple[str, str, str], dict[str, Any]], list[dict[str, Any]]]:
+    context = validate_pricing_context(recommendations, config)
     decisions = recommendations.get("decisions", [])
     expected_locations = sorted(set(recommendations.get("expected_locations", [])))
     zone_by_location = {item["location"].lower(): item for item in rate_zones}
@@ -281,7 +369,10 @@ def build_band_plans(
             raise ValueError(
                 f"Recommendation rate zone {declared_zone} does not match {location} / {rate_zone['code']}."
             )
-        by_key[(pickup_date, duration, location.lower())] = decision
+        key = (pickup_date, duration, location.lower())
+        if key in by_key:
+            raise ValueError(f"Duplicate recommendation decision: {key}.")
+        by_key[key] = decision
         band = find_band(duration, bands)
         if band:
             candidates.add((pickup_date, str(band["column"]), rate_zone["code"]))
@@ -299,12 +390,12 @@ def build_band_plans(
                 "column": column,
                 "rate_zone": zone_code,
                 "rate_zone_name": rate_zone["name"],
-                "reason": "Automatic updates are disabled because the import band is open-ended.",
+                "reason": "Automatic updates are disabled for this import band.",
             })
             continue
         required_durations = range(int(band["min_days"]), int(band["max_days"]) + 1)
         missing: list[str] = []
-        ratios: list[tuple[float, dict[str, Any]]] = []
+        targets: list[dict[str, Any]] = []
         for duration in required_durations:
             location = rate_zone["location"]
             decision = by_key.get((pickup_date, duration, location.lower()))
@@ -317,16 +408,11 @@ def build_band_plans(
                 )
                 continue
             try:
-                ratio = float(decision.get("maximum_adjustment_ratio"))
-            except (TypeError, ValueError):
-                missing.append(f"{location}/{duration}d invalid ratio")
-                continue
-            if ratio <= 0:
-                missing.append(f"{location}/{duration}d invalid ratio")
-                continue
-            ratios.append((ratio, decision))
+                targets.append(duration_target(decision, config, context))
+            except (TypeError, ValueError, KeyError) as error:
+                missing.append(f"{location}/{duration}d {error}")
 
-        if missing or not ratios:
+        if missing or not targets:
             blocked.append({
                 "pickup_date": pickup_date,
                 "duration_band": str(band["label"]),
@@ -336,20 +422,34 @@ def build_band_plans(
                 "reason": "; ".join(missing) if missing else "No usable decisions.",
             })
             continue
-        ratio, controlling = min(ratios, key=lambda item: item[0])
+        controlling = min(targets, key=lambda item: item["cap"])
+        target_net = controlling["cap"]
+        checks = []
+        for target in targets:
+            predicted = target_net * target["vat_multiplier"] * target["total"] / target["retained"]
+            achieved_rank = 1 + sum(rate <= predicted for rate in target["rates"])
+            if target_net < target["minimum"] or predicted > target["site_cap"] or achieved_rank > target["target_rank"]:
+                raise ValueError(f"Shared import price does not meet all duration constraints: {pickup_date}/{zone_code}/{column}.")
+            checks.append({
+                "rental_days": target["decision"]["rental_days"],
+                "target_rank": target["target_rank"], "achieved_rank": achieved_rank,
+                "predicted_site_gross_eur_day": float(predicted),
+                "supplier_gross_pln_day": float(target_net * target["vat_multiplier"] * target["fx"]),
+                "minimum_supplier_gross_pln_day": float(target["floor_pln"]),
+                "broker_markup_multiplier": float(target["broker"]),
+            })
         plans[(pickup_date, column, zone_code)] = {
-            "ratio": ratio,
+            "target_net_rate": float(target_net),
             "band": band,
-            "controlling": controlling,
+            "controlling": controlling["decision"],
             "rate_zone": rate_zone,
+            "checks": checks,
         }
     return plans, blocked
 
 
 def apply_plans(worksheet, plans, config: dict[str, Any]) -> list[dict[str, Any]]:
     groups = set(config.get("apply_groups", []))
-    precision = int(config.get("rate_precision", 3))
-    minimum_change = float(config.get("minimum_change_eur_day", 0.001))
     changes: list[dict[str, Any]] = []
     plans_by_scope: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
     for (pickup_date, column, zone_code), plan in plans.items():
@@ -368,8 +468,9 @@ def apply_plans(worksheet, plans, config: dict[str, Any]) -> list[dict[str, Any]
                 original = float(cell.value)
             except (TypeError, ValueError):
                 continue
-            updated = round(original * float(plan["ratio"]), precision)
-            if abs(updated - original) < minimum_change:
+            updated = float(plan["target_net_rate"])
+            # Even an over-precision baseline must end at the exact shared rate.
+            if Decimal(str(updated)) == Decimal(str(original)):
                 continue
             cell.value = updated
             controlling = plan["controlling"]
@@ -384,10 +485,10 @@ def apply_plans(worksheet, plans, config: dict[str, Any]) -> list[dict[str, Any]
                 "duration_band": str(plan["band"]["label"]),
                 "original_rate": original,
                 "updated_rate": updated,
-                "adjustment_ratio": float(plan["ratio"]),
+                "adjustment_ratio": updated / original if original else None,
                 "controlling_location": controlling.get("location"),
                 "controlling_duration_days": controlling.get("rental_days"),
-                "reason": controlling.get("reason"),
+                "reason": "Shared absolute net rate; all checked durations meet their best attainable rank.",
             }
             changes.append(change)
     return changes
@@ -408,9 +509,13 @@ def validate_plan_targets(worksheet, plans, config: dict[str, Any]) -> None:
         for column in columns_by_scope.get((pickup_date, zone_code), set()):
             value = worksheet.cell(row_index, column_index_from_string(column)).value
             try:
-                float(value)
-            except (TypeError, ValueError):
-                continue
+                parsed = decimal_number(value, "baseline rate")
+                if parsed < 0:
+                    raise ValueError("Negative baseline rate.")
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"Invalid planned baseline rate in row {row_index}, column {column}, group {group}."
+                ) from error
             available.add((pickup_date, column, zone_code, group))
 
     for (pickup_date, column, zone_code), plan in plans.items():
@@ -437,12 +542,12 @@ def style_report_sheet(worksheet) -> None:
         worksheet.column_dimensions[column_cells[0].column_letter].width = width
 
 
-def add_report_sheets(workbook, recommendations, changes, blocked, source_hash, expanded_rows) -> None:
+def add_report_sheets(workbook, recommendations, changes, blocked, source_hash, expanded_rows, plans) -> None:
     changed_sheet = workbook.create_sheet("Changed Positions")
     changed_headers = [
         "Row", "Cell", "Group", "Rate zone", "Rate zone name", "Metroplex",
         "Pickup date", "Duration band", "Original net EUR/day",
-        "Updated net EUR/day", "Adjustment ratio", "Controlling location", "Controlling duration", "Reason",
+        "Updated net EUR/day", "Actual change ratio", "Controlling location", "Controlling duration", "Reason",
     ]
     changed_sheet.append(changed_headers)
     for change in changes:
@@ -461,27 +566,47 @@ def add_report_sheets(workbook, recommendations, changes, blocked, source_hash, 
         "Action", "Type", "Quality", "Coverage",
         "MM rank", "MM gross EUR/day", "Pay Now EUR", "Pay Now EUR/day", "Pay Now share",
         "Broker markup", "Broker multiplier", "MM net EUR/day", "Benchmark", "Benchmark EUR/day",
-        "Target gross EUR/day", "Target net EUR/day", "Max multiplier", "Reason", "VAT percent",
+        "Individual target gross EUR/day", "Individual target net EUR/day", "Target rank", "Reason", "VAT percent",
+        "Minimum MM gross PLN/day", "EUR/PLN", "FX source", "FX date",
+        "Band net EUR/day", "Predicted gross EUR/day", "Achieved rank", "Band status",
     ]
     review_sheet.append(review_headers)
+    final_by_check = {}
+    for (pickup_date, _, zone), plan in plans.items():
+        for check in plan["checks"]:
+            final_by_check[(pickup_date, zone, int(check["rental_days"]))] = {
+                **check, "target_net_rate": plan["target_net_rate"]}
+    exchange = recommendations["exchange_rate"]
     for decision in recommendations.get("decisions", []):
+        final = final_by_check.get((decision.get("pickup_date"), decision.get("rate_zone"), int(decision.get("rental_days", 0))), {})
         review_sheet.append([
             decision.get("pickup_date"), decision.get("rental_days"), decision.get("location"),
             decision.get("rate_zone"), decision.get("rate_zone_name"), decision.get("metroplex"),
             decision.get("action"), decision.get("recommendation_type"), decision.get("data_quality_status"),
             decision.get("coverage_status"), decision.get("mm_rank"), decision.get("mm_rate_eur_day"),
-            decision.get("pay_now_total_eur"), decision.get("pay_now_eur_day"),
+            float(decision["pay_now_total_eur"]) if decision.get("pay_now_total_eur") is not None else None,
+            decision.get("pay_now_eur_day"),
             decision.get("pay_now_share_percent"), decision.get("broker_markup_percent"),
             decision.get("broker_markup_multiplier"), decision.get("mm_net_rate_eur_day"),
             decision.get("benchmark_provider"), decision.get("benchmark_rate_eur_day"),
             decision.get("site_target_rate_eur_day"), decision.get("site_target_net_rate_eur_day"),
-            decision.get("maximum_adjustment_ratio"), decision.get("reason"), decision.get("vat_rate_percent"),
+            decision.get("target_rank"), decision.get("reason"), decision.get("vat_rate_percent"),
+            decision.get("minimum_supplier_gross_pln_day"), exchange["pln_per_eur"],
+            exchange["source"], exchange.get("effective_date"), final.get("target_net_rate"),
+            final.get("predicted_site_gross_eur_day"), final.get("achieved_rank"),
+            "VERIFIED" if final else "UNCHANGED / BLOCKED",
         ])
     style_report_sheet(review_sheet)
 
     validation_sheet = workbook.create_sheet("Validation")
     validation_sheet.append(["Check", "Status", "Details"])
     validation_sheet.append(["Baseline manifest", "OK", source_hash])
+    validation_sheet.append(["Pricing model", "OK", recommendations["pricing_model"]])
+    validation_sheet.append(["EUR/PLN", "FALLBACK" if exchange["source"] == "fallback" else "OK",
+                             f"{exchange['pln_per_eur']} / {exchange['source']} / {exchange.get('effective_date') or 'no publication date'}"])
+    if exchange.get("reason"):
+        validation_sheet.append(["FX source details", "INFO", exchange["reason"]])
+    validation_sheet.append(["Verified duration constraints", "OK", len(final_by_check)])
     validation_sheet.append(["Expanded source rows", "OK", expanded_rows])
     validation_sheet.append(["Changed positions", "OK", len(changes)])
     validation_sheet.append(["Blocked duration bands", "REVIEW" if blocked else "OK", len(blocked)])
@@ -522,7 +647,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if not bands:
         raise ValueError("Config is missing duration_bands.")
     rate_zones = normalize_rate_zones(config)
-    plans, blocked = build_band_plans(recommendations, bands, rate_zones)
+    plans, blocked = build_band_plans(recommendations, bands, rate_zones, config)
     worksheet_name = str(config.get("worksheet", "RateGroup Export"))
 
     workbook, worksheet, expanded_rows = prepare_workbook(workbook_path, worksheet_name, rate_zones, bands)
@@ -538,11 +663,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         cell.fill = copy(CHANGE_FILL)
         cell.comment = Comment(
             f"VipCars recommendation: {change['original_rate']} -> {change['updated_rate']}. "
-            f"Multiplier {change['adjustment_ratio']:.4f}; controlling check: "
+            "Shared net EUR/day target; controlling check: "
             f"{change['controlling_location']}, {change['controlling_duration_days']} days.",
             "VipCars scraper",
         )
-    add_report_sheets(workbook, recommendations, changes, blocked, source_hash, expanded_rows)
+    add_report_sheets(workbook, recommendations, changes, blocked, source_hash, expanded_rows, plans)
     workbook.save(report_output)
 
     summary = {
@@ -552,6 +677,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "blocked_band_count": len(blocked),
         "rate_zone_count": len(rate_zones),
         "blocked_bands": blocked,
+        "pricing_model": recommendations["pricing_model"],
+        "exchange_rate": recommendations["exchange_rate"],
+        "verified_duration_count": sum(len(plan["checks"]) for plan in plans.values()),
         "report_output": str(report_output),
         "import_output": str(import_output),
     }
