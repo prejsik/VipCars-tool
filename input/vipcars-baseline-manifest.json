@@ -1,6 +1,18 @@
 {
-  "source_filename": "RateGroup Export (1).xlsx",
-  "workbook_sha256": "07590825cbc945eb85d3381a1b7233144b9cc55c675a820a6088ea38e1df9ad7",
+  "source_filename": "RateGroup Export (8).xlsx",
+  "source_sha256": "7973ef5946ea4aaadecfbf3732201ecabdca1581ad81d13a5950a7e289ca9edb",
+  "workbook_sha256": "8a957b4ca8d5d627b8f14d040b4de8065e617777a4d31b8765a8b9c22b90989d",
+  "excluded_source_rows": [
+    {
+      "row": 12326,
+      "group": "FVMD",
+      "pickup_start": "2026-09-16",
+      "pickup_end": "2027-08-31",
+      "reason": "Missing rate zone; branch cannot be inferred. Removal approved by user."
+    }
+  ],
+  "rate_basis": "net",
+  "vat_rate_percent": 23,
   "status": "user_provided",
   "purpose": "VipCars global rate import baseline"
 }

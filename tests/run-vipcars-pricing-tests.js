@@ -20,7 +20,10 @@ const rateZones = [
   { location: "Krakow", code: "KRA", name: "KRAKOW - AIRPORT", metroplex: "Main Metroplex" },
   { location: "Warsaw", code: "WAR", name: "WARSZAWA - AIRPORT", metroplex: "Main Metroplex" }
 ];
-fs.writeFileSync(configPath, JSON.stringify({ rate_zones: rateZones }), "utf8");
+fs.writeFileSync(configPath, JSON.stringify({
+  pricing: { vat_rate_percent: 23 },
+  rate_zones: rateZones
+}), "utf8");
 
 fs.writeFileSync(resultsPath, [
   "location,duration_days,pickup_date,dropoff_date,provider,provider_rating,total_price,price_per_day,pay_now_amount,pay_now_currency,currency,source",
@@ -60,6 +63,7 @@ assert.equal(result.status, 0, result.stderr || result.stdout);
 const payload = JSON.parse(fs.readFileSync(outputPath, "utf8"));
 assert.equal(payload.decision_count, 6);
 assert.equal(payload.active_count, 3);
+assert.equal(payload.vat_rate_percent, 23);
 assert.deepEqual(payload.expected_locations, ["Gdansk", "Krakow", "Warsaw"]);
 assert.deepEqual(payload.rate_zones, rateZones);
 
@@ -73,8 +77,11 @@ assert.equal(warsaw.pay_now_eur_day, 1);
 assert.equal(warsaw.pay_now_share_percent, 10);
 assert.equal(warsaw.broker_markup_multiplier, 1.1111);
 assert.equal(warsaw.broker_markup_percent, 11.1111);
-assert.equal(warsaw.mm_net_rate_eur_day, 9);
-assert.equal(warsaw.site_target_net_rate_eur_day, 13.75);
+assert.equal(warsaw.vat_rate_percent, 23);
+assert.equal(warsaw.mm_supplier_gross_rate_eur_day, 9);
+assert.equal(warsaw.mm_net_rate_eur_day, 7.3171);
+assert.equal(warsaw.site_target_supplier_gross_rate_eur_day, 13.75);
+assert.equal(warsaw.site_target_net_rate_eur_day, 11.1789);
 assert.equal(warsaw.maximum_adjustment_ratio, 1.5278);
 assert.equal(warsaw.rate_zone, "WAR");
 assert.equal(warsaw.rate_zone_name, "WARSZAWA - AIRPORT");
@@ -84,6 +91,10 @@ const krakow = byKey.get("2026-09-03|Krakow");
 assert.equal(krakow.recommendation_type, "top1_undercut");
 assert.equal(krakow.action, "decrease");
 assert.equal(krakow.site_target_rate_eur_day, 9.75);
+assert.equal(krakow.mm_supplier_gross_rate_eur_day, 10.8);
+assert.equal(krakow.mm_net_rate_eur_day, 8.7805);
+assert.equal(krakow.site_target_supplier_gross_rate_eur_day, 8.55);
+assert.equal(krakow.site_target_net_rate_eur_day, 6.9512);
 assert.equal(krakow.maximum_adjustment_ratio, 0.7917);
 
 const gdansk = byKey.get("2026-09-03|Gdansk");
@@ -94,6 +105,64 @@ assert.equal(gdansk.rate_zone, "GDA");
 
 assert.equal(byKey.get("2026-09-04|Warsaw").data_quality_status, "missing_mm");
 assert.equal(byKey.get("2026-09-04|Krakow").data_quality_status, "incomplete");
+
+const vat23Rows = [
+  {
+    location: "Warsaw", duration_days: "1", pickup_date: "2026-09-03", dropoff_date: "2026-09-04",
+    provider: "MM Cars Rental", total_price: "133", price_per_day: "133", currency: "EUR",
+    pay_now_amount: "10", pay_now_currency: "EUR"
+  },
+  {
+    location: "Warsaw", duration_days: "1", pickup_date: "2026-09-03", dropoff_date: "2026-09-04",
+    provider: "Rival A", total_price: "157.85", price_per_day: "157.85", currency: "EUR"
+  }
+];
+const vat23Coverage = [{
+  location: "Warsaw", duration_days: "1", pickup_date: "2026-09-03", dropoff_date: "2026-09-04",
+  status: "complete", result_count: "2", error: ""
+}];
+const vat23Options = {
+  expectedLocations: ["Warsaw"],
+  expectedDurations: [1],
+  expectedPickupCount: 1
+};
+const vat23Payload = buildRecommendations(vat23Rows, vat23Coverage, vat23Options);
+const vat23Decision = vat23Payload.decisions[0];
+assert.equal(vat23Payload.vat_rate_percent, 23);
+assert.equal(vat23Decision.vat_rate_percent, 23);
+assert.equal(vat23Decision.mm_rate_eur_day, 133);
+assert.equal(vat23Decision.mm_supplier_gross_rate_eur_day, 123);
+assert.equal(vat23Decision.mm_net_rate_eur_day, 100);
+assert.equal(vat23Decision.benchmark_rate_eur_day, 157.85);
+assert.equal(vat23Decision.site_target_rate_eur_day, 157.6);
+assert.equal(vat23Decision.site_target_supplier_gross_rate_eur_day, 147.6);
+assert.equal(vat23Decision.site_target_net_rate_eur_day, 120);
+assert.equal(vat23Decision.maximum_adjustment_ratio, 1.2);
+
+const rawRatioPayload = buildRecommendations([
+  {
+    location: "Warsaw", duration_days: "2", pickup_date: "2026-09-03", dropoff_date: "2026-09-05",
+    provider: "MM Cars Rental", total_price: "20", price_per_day: "10", currency: "EUR",
+    pay_now_amount: "0.01", pay_now_currency: "EUR"
+  },
+  {
+    location: "Warsaw", duration_days: "2", pickup_date: "2026-09-03", dropoff_date: "2026-09-05",
+    provider: "Rival A", total_price: "26.5", price_per_day: "13.25", currency: "EUR"
+  }
+], [{
+  location: "Warsaw", duration_days: "2", pickup_date: "2026-09-03", dropoff_date: "2026-09-05",
+  status: "complete", result_count: "2", error: ""
+}], {
+  expectedLocations: ["Warsaw"],
+  expectedDurations: [2],
+  expectedPickupCount: 1
+});
+assert.equal(rawRatioPayload.decisions[0].maximum_adjustment_ratio, 1.3002);
+
+assert.throws(
+  () => buildRecommendations(vat23Rows, vat23Coverage, { ...vat23Options, vatRatePercent: "invalid" }),
+  /VAT rate/i
+);
 
 const missingPayNow = buildRecommendations([
   {

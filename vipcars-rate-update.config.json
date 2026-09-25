@@ -30,6 +30,7 @@
     { "location": "Wroclaw", "code": "WRO", "name": "WROCLAW - AIRPORT", "metroplex": "Main Metroplex" }
   ],
   "pricing": {
+    "vat_rate_percent": 23,
     "threshold_eur_day": 2.5,
     "undercut_eur_day": 0.25,
     "min_broker_markup_multiplier": 1,
@@ -39,9 +40,8 @@
   },
   "duration_bands": [
     { "column": "I", "label": "1", "min_days": 1, "max_days": 1 },
-    { "column": "J", "label": "2", "min_days": 2, "max_days": 2 },
-    { "column": "K", "label": "3-4", "min_days": 3, "max_days": 4 },
-    { "column": "L", "label": "5-7", "min_days": 5, "max_days": 7 },
-    { "column": "M", "label": "8+", "min_days": 8, "max_days": 14, "update_enabled": false }
+    { "column": "J", "label": "2-6", "min_days": 2, "max_days": 6 },
+    { "column": "K", "label": "7-8", "min_days": 7, "max_days": 8 },
+    { "column": "L", "label": "9+", "min_days": 9, "max_days": 14, "update_enabled": false }
   ]
 }

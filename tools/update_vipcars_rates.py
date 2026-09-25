@@ -17,10 +17,9 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import column_index_from_string
 
 
-EXPECTED_HEADERS = [
+BASE_HEADERS = [
     "Group", "Miles / pd", "Mile rate", "Pickup start", "Pickup end",
-    "Rate zone", "Booking start", "Booking end", "1  per day", "2  per day",
-    "3 - 4  per day", "5 - 7  per day", "8+ per day",
+    "Rate zone", "Booking start", "Booking end",
 ]
 CHANGE_FILL = PatternFill(fill_type="solid", fgColor="FFF2CC")
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="D9EAF7")
@@ -81,11 +80,21 @@ def parse_date(value: Any) -> date:
     raise ValueError(f"Unsupported date value: {value!r}")
 
 
-def validate_sheet(worksheet) -> None:
-    if worksheet.max_column != len(EXPECTED_HEADERS):
-        raise ValueError(f"Import worksheet must contain exactly 13 columns, found {worksheet.max_column}.")
-    actual = [worksheet.cell(1, column).value for column in range(1, len(EXPECTED_HEADERS) + 1)]
-    if actual != EXPECTED_HEADERS:
+def validate_sheet(worksheet, bands: list[dict[str, Any]]) -> None:
+    expected = list(BASE_HEADERS)
+    for index, band in enumerate(bands, start=9):
+        if column_index_from_string(band["column"]) != index:
+            raise ValueError("Duration band columns must follow the template consecutively from I.")
+        start, end = int(band["min_days"]), int(band["max_days"])
+        if str(band["label"]).endswith("+"):
+            expected.append(f"{start}+ per day")
+        else:
+            duration = str(start) if start == end else f"{start} - {end}"
+            expected.append(f"{duration}  per day")
+    if worksheet.max_column != len(expected):
+        raise ValueError(f"Import worksheet must contain exactly {len(expected)} columns, found {worksheet.max_column}.")
+    actual = [worksheet.cell(1, column).value for column in range(1, len(expected) + 1)]
+    if actual != expected:
         raise ValueError(f"Unexpected import headers: {actual!r}")
 
 
@@ -108,8 +117,8 @@ def copy_row(worksheet, source_row: int, target_row: int, max_column: int | None
             target.comment = copy(source.comment)
 
 
-def expand_pickup_ranges(worksheet) -> int:
-    validate_sheet(worksheet)
+def expand_pickup_ranges(worksheet, bands: list[dict[str, Any]]) -> int:
+    validate_sheet(worksheet, bands)
     original_rows = []
     for row_index in range(2, worksheet.max_row + 1):
         start = parse_date(worksheet.cell(row_index, 4).value)
@@ -432,8 +441,8 @@ def add_report_sheets(workbook, recommendations, changes, blocked, source_hash, 
     changed_sheet = workbook.create_sheet("Changed Positions")
     changed_headers = [
         "Row", "Cell", "Group", "Rate zone", "Rate zone name", "Metroplex",
-        "Pickup date", "Duration band", "Original rate",
-        "Updated rate", "Adjustment ratio", "Controlling location", "Controlling duration", "Reason",
+        "Pickup date", "Duration band", "Original net EUR/day",
+        "Updated net EUR/day", "Adjustment ratio", "Controlling location", "Controlling duration", "Reason",
     ]
     changed_sheet.append(changed_headers)
     for change in changes:
@@ -450,9 +459,9 @@ def add_report_sheets(workbook, recommendations, changes, blocked, source_hash, 
     review_headers = [
         "Pickup date", "Duration", "Location", "Rate zone", "Rate zone name", "Metroplex",
         "Action", "Type", "Quality", "Coverage",
-        "MM rank", "MM EUR/day", "Pay Now EUR", "Pay Now EUR/day", "Pay Now share",
+        "MM rank", "MM gross EUR/day", "Pay Now EUR", "Pay Now EUR/day", "Pay Now share",
         "Broker markup", "Broker multiplier", "MM net EUR/day", "Benchmark", "Benchmark EUR/day",
-        "Target EUR/day", "Target net EUR/day", "Max multiplier", "Reason",
+        "Target gross EUR/day", "Target net EUR/day", "Max multiplier", "Reason", "VAT percent",
     ]
     review_sheet.append(review_headers)
     for decision in recommendations.get("decisions", []):
@@ -466,7 +475,7 @@ def add_report_sheets(workbook, recommendations, changes, blocked, source_hash, 
             decision.get("broker_markup_multiplier"), decision.get("mm_net_rate_eur_day"),
             decision.get("benchmark_provider"), decision.get("benchmark_rate_eur_day"),
             decision.get("site_target_rate_eur_day"), decision.get("site_target_net_rate_eur_day"),
-            decision.get("maximum_adjustment_ratio"), decision.get("reason"),
+            decision.get("maximum_adjustment_ratio"), decision.get("reason"), decision.get("vat_rate_percent"),
         ])
     style_report_sheet(review_sheet)
 
@@ -485,7 +494,7 @@ def add_report_sheets(workbook, recommendations, changes, blocked, source_hash, 
     style_report_sheet(validation_sheet)
 
 
-def prepare_workbook(source: Path, worksheet_name: str, rate_zones: list[dict[str, str]]):
+def prepare_workbook(source: Path, worksheet_name: str, rate_zones: list[dict[str, str]], bands):
     workbook = load_workbook(source)
     if worksheet_name not in workbook.sheetnames:
         raise ValueError(f"Worksheet {worksheet_name!r} was not found.")
@@ -493,7 +502,7 @@ def prepare_workbook(source: Path, worksheet_name: str, rate_zones: list[dict[st
         if sheet.title != worksheet_name:
             workbook.remove(sheet)
     worksheet = workbook[worksheet_name]
-    expand_pickup_ranges(worksheet)
+    expand_pickup_ranges(worksheet, bands)
     expanded_rows = expand_rate_zones(worksheet, rate_zones)
     return workbook, worksheet, expanded_rows
 
@@ -516,7 +525,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     plans, blocked = build_band_plans(recommendations, bands, rate_zones)
     worksheet_name = str(config.get("worksheet", "RateGroup Export"))
 
-    workbook, worksheet, expanded_rows = prepare_workbook(workbook_path, worksheet_name, rate_zones)
+    workbook, worksheet, expanded_rows = prepare_workbook(workbook_path, worksheet_name, rate_zones, bands)
     validate_plan_targets(worksheet, plans, config)
     changes = apply_plans(worksheet, plans, config)
     report_output.parent.mkdir(parents=True, exist_ok=True)

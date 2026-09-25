@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,6 +28,127 @@ RATE_ZONES = [
     {"location": "Krakow", "code": "KRA", "name": "KRAKOW - AIRPORT", "metroplex": "Main Metroplex"},
     {"location": "Warsaw", "code": "WAR", "name": "WARSZAWA - AIRPORT", "metroplex": "Main Metroplex"},
 ]
+LEGACY_BANDS = [
+    {"column": "I", "label": "1", "min_days": 1, "max_days": 1},
+    {"column": "J", "label": "2", "min_days": 2, "max_days": 2},
+    {"column": "K", "label": "3-4", "min_days": 3, "max_days": 4},
+    {"column": "L", "label": "5-7", "min_days": 5, "max_days": 7},
+    {"column": "M", "label": "8+", "min_days": 8, "max_days": 14, "update_enabled": False},
+]
+NEW_HEADERS = HEADERS[:9] + ["2 - 6  per day", "7 - 8  per day", "9+ per day"]
+
+
+def check_new_template() -> None:
+    spec = importlib.util.spec_from_file_location("vipcars_rate_updater", SCRIPT)
+    updater = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(updater)
+    config = json.loads((ROOT / "vipcars-rate-update.config.json").read_text(encoding="utf-8"))
+    bands = config["duration_bands"]
+    sheet = Workbook().active
+    sheet.append(NEW_HEADERS)
+    sheet.append(["CFAR", 0, None, "25/09/2026", "25/09/2026", "WAR", None, None, 40, 100, 90, 80])
+    assert updater.expand_pickup_ranges(sheet, bands) == 1
+    decisions = [
+        {"location": zone["location"], "pickup_date": "2026-09-25", "rental_days": days,
+         "maximum_adjustment_ratio": 0.9 if days == 6 else 1.1,
+         "data_quality_status": "ok", "coverage_status": "complete"}
+        for zone in RATE_ZONES for days in range(2, 15)
+    ]
+    recommendations = {"expected_locations": [zone["location"] for zone in RATE_ZONES], "decisions": decisions}
+    plans, blocked = updater.build_band_plans(recommendations, bands, RATE_ZONES)
+    assert {key[1] for key in plans} == {"J", "K"}
+    assert {item["duration_band"] for item in blocked} == {"9+"}
+    updater.apply_plans(sheet, plans, {"apply_groups": ["CFAR"]})
+    # Baseline rates are already net: apply the ratio, never divide by VAT again.
+    assert [sheet.cell(2, col).value for col in range(9, 13)] == [40, 90, 99, 80]
+    recommendations["decisions"] = [item for item in decisions if item["rental_days"] not in (6, 8)]
+    incomplete_plans, incomplete_blocked = updater.build_band_plans(recommendations, bands, RATE_ZONES)
+    assert not incomplete_plans
+    assert {item["duration_band"] for item in incomplete_blocked} == {"2-6", "7-8", "9+"}
+    try:
+        updater.validate_sheet(sheet, LEGACY_BANDS)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("New template must reject old duration mappings")
+    sheet["J1"] = "2 - 5  per day"
+    try:
+        updater.validate_sheet(sheet, bands)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Same-width template with different durations must be rejected")
+
+
+def check_production_net_import(config: dict, source_rows: list[tuple]) -> None:
+    with tempfile.TemporaryDirectory(prefix="vipcars-net-import-") as raw_temp:
+        temp = Path(raw_temp)
+        recommendations_path = temp / "recommendations.json"
+        generated = subprocess.run(["node", "-e", """
+const fs = require('node:fs');
+const { buildRecommendations } = require('./src/vipcars/pricingRecommendations');
+const config = require('./vipcars-rate-update.config.json');
+const offers = [], coverage = [];
+for (const zone of config.rate_zones) {
+  for (let days = 2; days <= 14; days++) {
+    const check = { location: zone.location, duration_days: days, pickup_date: '2026-10-01',
+      dropoff_date: `2026-10-${String(1 + days).padStart(2, '0')}`, status: 'complete', result_count: 2 };
+    coverage.push(check);
+    offers.push({ ...check, provider: 'MM Cars Rental', currency: 'EUR',
+      price_per_day: 133, total_price: 133 * days, pay_now_amount: 10 * days, pay_now_currency: 'EUR' });
+    offers.push({ ...check, provider: 'Test competitor', currency: 'EUR',
+      price_per_day: 157.85, total_price: 157.85 * days });
+  }
+}
+const result = buildRecommendations(offers, coverage, {
+  expectedLocations: config.rate_zones.map(zone => zone.location),
+  expectedDurations: Array.from({length:13}, (_, index) => index + 2),
+  expectedPickupCount: 1, rateZones: config.rate_zones, vatRatePercent: config.pricing.vat_rate_percent
+});
+fs.writeFileSync(process.argv[1], JSON.stringify(result));
+""", str(recommendations_path)], cwd=ROOT, capture_output=True, text=True)
+        assert generated.returncode == 0, generated.stderr
+        recommendations = json.loads(recommendations_path.read_text())
+        assert len(recommendations["decisions"]) == 91
+        assert all(item["mm_net_rate_eur_day"] == 100
+                   and item["site_target_net_rate_eur_day"] == 120
+                   and item["maximum_adjustment_ratio"] == 1.2
+                   for item in recommendations["decisions"])
+        result = subprocess.run([
+            sys.executable, str(SCRIPT), "--workbook", str(ROOT / "input/vipcars-rate-group-export.xlsx"),
+            "--recommendations", str(recommendations_path),
+            "--config", str(ROOT / "vipcars-rate-update.config.json"),
+            "--report-output", str(temp / "review.xlsx"), "--import-output", str(temp / "import.xlsx"),
+        ], cwd=ROOT, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        summary = json.loads(result.stdout)
+        assert summary["change_count"] == 210
+        assert summary["blocked_band_count"] == 7
+        imported = load_workbook(temp / "import.xlsx", read_only=True)
+        assert imported.sheetnames == ["RateGroup Export"]
+        sheet = imported.active
+        assert sheet.max_column == 12
+        assert sheet.max_row - 1 == summary["expanded_source_row_count"] == 17297
+        actual = iter(sheet.iter_rows(min_row=2, values_only=True))
+        for source in source_rows:
+            start = datetime.strptime(source[3], "%d/%m/%Y").date()
+            end = datetime.strptime(source[4], "%d/%m/%Y").date()
+            for offset in range((end - start).days + 1):
+                day = start + timedelta(days=offset)
+                expected = list(source)
+                expected[3] = expected[4] = day.strftime("%d/%m/%Y")
+                if day.isoformat() == "2026-10-01" and source[0] in config["apply_groups"]:
+                    expected[9] = round(float(source[9]) * 1.2, 3)
+                    expected[10] = round(float(source[10]) * 1.2, 3)
+                assert next(actual) == tuple(expected), (source[0], source[5], day)
+        assert next(actual, None) is None
+        imported.close()
+        review = load_workbook(temp / "review.xlsx", read_only=True)
+        rows = list(review["Recommendations Review"].values)
+        first = dict(zip(rows[0], rows[1]))
+        assert first["VAT percent"] == 23 and first["MM net EUR/day"] == 100
+        assert first["Target net EUR/day"] == 120
+        review.close()
 
 
 def build_workbook(path: Path) -> None:
@@ -167,7 +289,7 @@ def check_expansion_preserves_formatting() -> None:
     cell.hyperlink = "https://www.vipcars.com/"
     cell.comment = Comment("Source note", "Test")
     with patch.object(sheet, "insert_rows", wraps=sheet.insert_rows) as insert:
-        assert updater.expand_pickup_ranges(sheet) == 4
+        assert updater.expand_pickup_ranges(sheet, LEGACY_BANDS) == 4
         insert.assert_called_once_with(3, 2)
     for row in (3, 4):
         copied = sheet.cell(row, 10)
@@ -184,6 +306,7 @@ def check_expansion_preserves_formatting() -> None:
 
 
 def main() -> None:
+    check_new_template()
     check_expansion_preserves_formatting()
     with tempfile.TemporaryDirectory(prefix="vipcars-rate-updater-") as raw_temp:
         temp = Path(raw_temp)
@@ -447,7 +570,11 @@ def main() -> None:
     assert hashlib.sha256(production_workbook.read_bytes()).hexdigest() == production_manifest["workbook_sha256"]
     production_book = load_workbook(production_workbook, read_only=True, data_only=False)
     production_sheet = production_book[production_config["worksheet"]]
-    assert [cell.value for cell in next(production_sheet.iter_rows(max_row=1))] == HEADERS
+    assert [cell.value for cell in next(production_sheet.iter_rows(max_row=1))] == NEW_HEADERS
+    assert production_config["pricing"]["vat_rate_percent"] == 23
+    assert production_sheet.max_row == 16323
+    assert all(row[5] in {"BYD", "GDA", "KAT", "KRA", "POZ", "WAR", "WRO"}
+               for row in production_sheet.iter_rows(min_row=2, values_only=True))
     assert set(production_config["apply_groups"]) == {
         "CFAR", "CFAR1", "CFAR2", "CWAR", "CWAR1", "CWAR2", "CWAR3",
         "EDAR", "IDAR", "IDAR1", "IFAR", "IFAR1", "IFAR2", "PDAR", "PFAR",
@@ -461,6 +588,9 @@ def main() -> None:
         {"location": "Warsaw", "code": "WAR", "name": "WARSZAWA - AIRPORT", "metroplex": "Main Metroplex"},
         {"location": "Wroclaw", "code": "WRO", "name": "WROCLAW - AIRPORT", "metroplex": "Main Metroplex"},
     ]
+
+    check_production_net_import(production_config, list(production_sheet.iter_rows(min_row=2, values_only=True)))
+    production_book.close()
 
     print("All VipCars rate updater tests passed.")
 

@@ -10,6 +10,7 @@ const DEFAULT_MIN_BROKER_MARKUP_MULTIPLIER = 1;
 const DEFAULT_MAX_BROKER_MARKUP_MULTIPLIER = 1.25;
 const DEFAULT_MIN_ADJUSTMENT_RATIO = 0.7;
 const DEFAULT_MAX_ADJUSTMENT_RATIO = 1.6;
+const DEFAULT_VAT_RATE_PERCENT = 23;
 
 function isMmCarsProvider(value) {
   return String(value || "").trim().toLowerCase().includes("mm cars rental");
@@ -146,6 +147,7 @@ function decisionBase(check, rateZone) {
     dropoff_date: check.dropoff_date,
     rental_days: Number(check.duration_days),
     currency: "EUR",
+    vat_rate_percent: null,
     action: "hold",
     recommendation_type: "none",
     target_rank: null,
@@ -158,10 +160,12 @@ function decisionBase(check, rateZone) {
     broker_markup_multiplier: null,
     broker_markup_percent: null,
     broker_markup_source: null,
+    mm_supplier_gross_rate_eur_day: null,
     mm_net_rate_eur_day: null,
     benchmark_provider: null,
     benchmark_rate_eur_day: null,
     site_target_rate_eur_day: null,
+    site_target_supplier_gross_rate_eur_day: null,
     site_target_net_rate_eur_day: null,
     maximum_adjustment_ratio: 1,
     data_quality_status: "ok",
@@ -195,8 +199,8 @@ function payNowCalibration(mm, options) {
     return { error: "invalid_pay_now", reason: "The MM Cars Rental Pay Now amount is not valid for this offer." };
   }
 
-  const netTotal = total - amount;
-  const brokerMultiplier = total / netTotal;
+  const supplierGrossTotal = total - amount;
+  const brokerMultiplier = total / supplierGrossTotal;
   if (
     brokerMultiplier < options.minBrokerMarkupMultiplier
     || brokerMultiplier > options.maxBrokerMarkupMultiplier
@@ -207,20 +211,32 @@ function payNowCalibration(mm, options) {
         + `${options.minBrokerMarkupMultiplier}-${options.maxBrokerMarkupMultiplier} range.`
     };
   }
+  const payNowRate = amount / days;
+  const supplierGrossRate = supplierGrossTotal / days;
+  const vatMultiplier = 1 + (options.vatRatePercent / 100);
   return {
-    pay_now_total_eur: roundRate(amount),
-    pay_now_eur_day: roundRate(amount / days),
-    pay_now_share_percent: roundRate((amount / total) * 100),
-    broker_markup_multiplier: roundRate(brokerMultiplier),
-    broker_markup_percent: roundRate((amount / netTotal) * 100),
-    broker_markup_source: "scraped_pay_now",
-    mm_net_rate_eur_day: roundRate(netTotal / days)
+    values: {
+      pay_now_total_eur: roundRate(amount),
+      pay_now_eur_day: roundRate(payNowRate),
+      pay_now_share_percent: roundRate((amount / total) * 100),
+      broker_markup_multiplier: roundRate(brokerMultiplier),
+      broker_markup_percent: roundRate((amount / supplierGrossTotal) * 100),
+      broker_markup_source: "scraped_pay_now",
+      mm_supplier_gross_rate_eur_day: roundRate(supplierGrossRate),
+      mm_net_rate_eur_day: roundRate(supplierGrossRate / vatMultiplier)
+    },
+    raw: { payNowRate, supplierGrossRate }
   };
 }
 
-function applySiteTarget(decision, target, options) {
-  const targetNet = target - decision.pay_now_eur_day;
-  if (!Number.isFinite(targetNet) || targetNet <= 0 || !Number.isFinite(decision.mm_net_rate_eur_day)) {
+function applySiteTarget(decision, target, options, calibration) {
+  const supplierGrossTargetRate = target - calibration.raw.payNowRate;
+  const targetNet = supplierGrossTargetRate / (1 + (options.vatRatePercent / 100));
+  if (
+    !Number.isFinite(supplierGrossTargetRate) || supplierGrossTargetRate <= 0
+    || !Number.isFinite(targetNet) || targetNet <= 0
+    || !Number.isFinite(calibration.raw.supplierGrossRate) || calibration.raw.supplierGrossRate <= 0
+  ) {
     decision.action = "hold";
     decision.recommendation_type = "none";
     decision.maximum_adjustment_ratio = 1;
@@ -229,8 +245,9 @@ function applySiteTarget(decision, target, options) {
     return decision;
   }
   decision.site_target_rate_eur_day = roundRate(target);
+  decision.site_target_supplier_gross_rate_eur_day = roundRate(supplierGrossTargetRate);
   decision.site_target_net_rate_eur_day = roundRate(targetNet);
-  const adjustmentRatio = targetNet / decision.mm_net_rate_eur_day;
+  const adjustmentRatio = supplierGrossTargetRate / calibration.raw.supplierGrossRate;
   if (
     adjustmentRatio < options.minAdjustmentRatio
     || adjustmentRatio > options.maxAdjustmentRatio
@@ -285,14 +302,14 @@ function buildDecision(check, offers, options, rateZone) {
     const decision = blockedDecision(check, "missing_benchmark", "No EUR competitor is available for comparison.", rateZone);
     decision.mm_rank = mmIndex + 1;
     decision.mm_rate_eur_day = roundRate(mmRate);
-    Object.assign(decision, calibration);
+    Object.assign(decision, calibration.values);
     return decision;
   }
 
   const decision = decisionBase(check, rateZone);
   decision.mm_rank = mmIndex + 1;
   decision.mm_rate_eur_day = roundRate(mmRate);
-  Object.assign(decision, calibration);
+  Object.assign(decision, calibration.values);
 
   if (mmIndex === 0) {
     const benchmark = ranked.find((offer) => (
@@ -309,7 +326,7 @@ function buildDecision(check, offers, options, rateZone) {
       decision.action = "increase";
       decision.recommendation_type = "top1_gap";
       decision.reason = `MM Cars Rental is first and ${roundRate(gap)} EUR/day below the next competitor.`;
-      applySiteTarget(decision, target, options);
+      applySiteTarget(decision, target, options, calibration);
     } else {
       decision.recommendation_type = "top1_hold";
       decision.reason = "MM Cars Rental is first without a material price gap.";
@@ -333,7 +350,7 @@ function buildDecision(check, offers, options, rateZone) {
     decision.action = "decrease";
     decision.recommendation_type = mmIndex === 1 ? "top1_undercut" : "rank_step_undercut";
     decision.reason = `MM Cars Rental can move from rank ${mmIndex + 1} to rank ${mmIndex}.`;
-    applySiteTarget(decision, target, options);
+    applySiteTarget(decision, target, options, calibration);
   } else {
     decision.recommendation_type = "rank_hold";
     decision.reason = gap <= 0
@@ -354,8 +371,12 @@ function buildRecommendations(resultRows, coverageRows, options = {}) {
       options.maxBrokerMarkupMultiplier ?? DEFAULT_MAX_BROKER_MARKUP_MULTIPLIER
     ),
     minAdjustmentRatio: Number(options.minAdjustmentRatio ?? DEFAULT_MIN_ADJUSTMENT_RATIO),
-    maxAdjustmentRatio: Number(options.maxAdjustmentRatio ?? DEFAULT_MAX_ADJUSTMENT_RATIO)
+    maxAdjustmentRatio: Number(options.maxAdjustmentRatio ?? DEFAULT_MAX_ADJUSTMENT_RATIO),
+    vatRatePercent: Number(options.vatRatePercent ?? DEFAULT_VAT_RATE_PERCENT)
   };
+  if (!Number.isFinite(settings.vatRatePercent) || settings.vatRatePercent < 0) {
+    throw new Error("VAT rate must be a finite, non-negative percentage.");
+  }
   const coveragePlan = validateCoverageMatrix(coverageRows, options);
   const zones = rateZonePlan(options.rateZones, coveragePlan.expectedLocations);
   const offersByCheck = new Map();
@@ -369,12 +390,16 @@ function buildRecommendations(resultRows, coverageRows, options = {}) {
 
   const checks = coverageRows;
   const decisions = checks
-    .map((check) => buildDecision(
-      check,
-      offersByCheck.get(checkKey(check)) || [],
-      settings,
-      zones.byLocation.get(String(check.location).toLowerCase())
-    ))
+    .map((check) => {
+      const decision = buildDecision(
+        check,
+        offersByCheck.get(checkKey(check)) || [],
+        settings,
+        zones.byLocation.get(String(check.location).toLowerCase())
+      );
+      decision.vat_rate_percent = settings.vatRatePercent;
+      return decision;
+    })
     .sort((left, right) => (
       left.pickup_date.localeCompare(right.pickup_date)
       || left.rental_days - right.rental_days
@@ -389,6 +414,7 @@ function buildRecommendations(resultRows, coverageRows, options = {}) {
     generated_at: new Date().toISOString(),
     threshold_eur_day: settings.thresholdEurDay,
     undercut_eur_day: settings.undercutEurDay,
+    vat_rate_percent: settings.vatRatePercent,
     expected_locations: coveragePlan.expectedLocations,
     rate_zones: zones.rateZones,
     covered_durations: coveragePlan.expectedDurations,
@@ -420,6 +446,7 @@ function loadOptions(argv) {
     maxBrokerMarkupMultiplier: pricing.max_broker_markup_multiplier,
     minAdjustmentRatio: pricing.min_adjustment_ratio,
     maxAdjustmentRatio: pricing.max_adjustment_ratio,
+    vatRatePercent: pricing.vat_rate_percent,
     rateZones: config.rate_zones,
     expectedLocations: listValue("expected-locations").length
       ? listValue("expected-locations")
