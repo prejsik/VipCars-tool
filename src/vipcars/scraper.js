@@ -1,6 +1,8 @@
 const path = require("path");
 const { chromium } = require("playwright");
 const { normalizeVehicleCategory } = require("./config");
+const { createAttemptDiagnostics, sanitizeMessage } = require("./diagnostics");
+const readiness = require("./resultReadiness");
 const {
   ensureDir,
   formatMoney,
@@ -12,23 +14,23 @@ const {
 } = require("./utils");
 
 const MAX_TIMEOUT_RETRIES = 2;
-const NO_RESULTS_SELECTOR = '.notFoundImg img[alt="No Results Found"]';
 
 class VipCarsScraper {
   constructor(config) {
     this.config = config;
+    this.attemptCounts = new Map();
   }
 
-  async run(onProgress) {
+  async run(onProgress, options = {}) {
     ensureDir(this.config.artifactsDir);
-    const browser = await chromium.launch({ headless: this.config.headless });
+    const browser = options.browser || await chromium.launch({ headless: this.config.headless });
     const results = [];
     const failures = [];
     const checks = [];
 
     try {
       for (const location of this.config.locations) {
-        const outcome = await this.runLocationWithRetries(browser, location);
+        const outcome = await this.runLocationWithRetries(browser, location, options);
         if (outcome.ok) {
           results.push(...outcome.results);
           checks.push({ location, status: "complete", resultCount: outcome.results.length });
@@ -38,7 +40,8 @@ class VipCarsScraper {
             console.log(`NONE ${location} -> no automatic-transmission offers.`);
           }
         } else {
-          failures.push({ location, error: outcome.error.message });
+          failures.push({ location, error: outcome.error.message,
+            retryable: outcome.retryable, attempts: outcome.attempts });
           checks.push({ location, status: "incomplete", resultCount: 0, error: outcome.error.message });
           console.log(`ERR ${location} -> ${outcome.error.message}`);
         }
@@ -47,59 +50,122 @@ class VipCarsScraper {
         }
       }
     } finally {
-      await browser.close();
+      if (!options.browser) {
+        await browser.close();
+      }
     }
 
     return { results, failures, checks };
   }
 
-  async runLocationWithRetries(browser, location) {
-    for (let retryCount = 0; retryCount <= MAX_TIMEOUT_RETRIES; retryCount += 1) {
-      const outcome = await this.runSingleLocation(browser, location);
-      if (outcome.ok || !isTimeoutError(outcome.error) || retryCount === MAX_TIMEOUT_RETRIES) {
+  async runLocationWithRetries(browser, location, options = {}) {
+    const counts = options.attemptCounts || this.attemptCounts;
+    const key = [this.config.pickupDate, this.config.dropoffDate,
+      this.config.currentDurationDays, location].join("|");
+    const maxAttempts = options.maxAttemptsPerCheck ?? MAX_TIMEOUT_RETRIES + 1;
+    const passAttempts = options.attemptsPerPass ?? maxAttempts;
+    const deadlineAt = options.deadlineAt ?? Infinity;
+    let outcome;
+    for (let pass = 0; pass < passAttempts; pass += 1) {
+      const attempts = counts.get(key) || 0;
+      if (Date.now() >= deadlineAt || attempts >= maxAttempts) {
+        const code = Date.now() >= deadlineAt ? "JOB_DEADLINE" : "ATTEMPT_LIMIT";
+        const error = new Error(`${code}: no further search attempt allowed.`);
+        error.code = code;
+        return { ok: false, error, attempts, retryable: false };
+      }
+      counts.set(key, attempts + 1);
+      outcome = await this.runSingleLocation(browser, location, {
+        attempt: attempts + 1, deadlineAt
+      });
+      outcome.attempts = attempts + 1;
+      outcome.retryable = !outcome.ok && outcome.attempts < maxAttempts
+        && Date.now() < deadlineAt && (outcome.error?.retryable === true || isTimeoutError(outcome.error));
+      if (outcome.ok || !outcome.retryable) {
         return outcome;
       }
-      console.log(`RETRY ${location} -> timeout; retry ${retryCount + 1}/${MAX_TIMEOUT_RETRIES}`);
+      if (pass + 1 < passAttempts) {
+        console.log(`RETRY ${location} -> attempt ${outcome.attempts + 1}/${maxAttempts}`);
+      }
     }
+    return outcome;
   }
 
-  async runSingleLocation(browser, location) {
-    const context = await browser.newContext({
-      viewport: { width: 1440, height: 1200 },
-      locale: "en-IE",
-      extraHTTPHeaders: {
-        "Accept-Language": "en-IE,en;q=0.9,pl;q=0.8"
-      }
+  async runSingleLocation(browser, location, options = {}) {
+    const attempt = options.attempt || 1;
+    const attemptBudgetMs = this.config.attemptBudgetMs || 90000;
+    const deadlineAt = Math.min(options.deadlineAt ?? Infinity, Date.now() + attemptBudgetMs);
+    const remaining = () => Math.max(1, deadlineAt - Date.now());
+    const diagnostics = createAttemptDiagnostics({
+      location, pickup_date: this.config.pickupDate,
+      duration_days: this.config.currentDurationDays, attempt
     });
-    await this.configureCurrency(context);
-    await context.route("**/*", async (route) => {
-      const type = route.request().resourceType();
-      if (type === "image" || type === "font" || type === "media") {
-        await route.abort().catch(() => {});
-        return;
-      }
-      await route.continue().catch(() => {});
-    });
-
-    const page = await context.newPage();
-    page.setDefaultTimeout(this.config.timeoutMs);
-    page.setDefaultNavigationTimeout(this.config.timeoutMs);
-
+    let context;
+    let page;
+    let expired = false;
+    let rejectDeadline;
+    const deadline = new Promise((resolve, reject) => { rejectDeadline = reject; });
+    const bounded = (operation) => Promise.race([operation, deadline]);
+    const watchdog = setTimeout(() => {
+      expired = true;
+      rejectDeadline(new Error("Search attempt deadline reached."));
+    }, remaining());
     try {
+      context = await bounded(browser.newContext({
+        viewport: { width: 1440, height: 1200 },
+        locale: "en-IE",
+        extraHTTPHeaders: {
+          "Accept-Language": "en-IE,en;q=0.9,pl;q=0.8"
+        }
+      }).then((created) => {
+        if (expired) {
+          created.close().catch(() => {});
+          throw new Error("Search attempt deadline reached while opening context.");
+        }
+        return created;
+      }));
+      if (expired) throw new Error("Search attempt deadline reached while opening context.");
+      await bounded(this.configureCurrency(context));
+      await bounded(context.route("**/*", async (route) => {
+        const type = route.request().resourceType();
+        if (type === "image" || type === "font" || type === "media") {
+          await route.abort().catch(() => {});
+          return;
+        }
+        await route.continue().catch(() => {});
+      }));
+
+      page = await bounded(context.newPage());
+      diagnostics.attach(page);
+      page.setDefaultTimeout(remaining());
+      page.setDefaultNavigationTimeout(remaining());
+
       const resolvedLocation = resolveVipCarsLocation(location);
       console.log(`    Search location: ${resolvedLocation.name} (${resolvedLocation.code || resolvedLocation.locationId})`);
       console.log(`    Search time: ${this.config.pickupTime} -> ${this.config.dropoffTime}`);
-      await page.goto(this.buildSearchUrl(location), { waitUntil: "domcontentloaded" });
-      const searchOutcome = await this.waitForSearchOutcome(page);
+      const response = await diagnostics.measure("navigation", () => bounded(page.goto(this.buildSearchUrl(location), {
+        waitUntil: "domcontentloaded", timeout: Math.min(this.config.timeoutMs || 45000, remaining())
+      })));
+      if (response && response.status() >= 400) {
+        const error = new Error(`HTTP ${response.status()}: search page unavailable.`);
+        error.code = `HTTP_${response.status()}`;
+        error.retryable = response.status() >= 500;
+        throw error;
+      }
+      const waitOptions = { timeoutMs: attemptBudgetMs, deadlineAt,
+        onState: diagnostics.recordResultState };
+      const searchOutcome = await diagnostics.measure("search", () => bounded(this.waitForSearchOutcome(page, {
+        ...waitOptions, timeoutMs: this.config.timeoutMs || 45000
+      })));
       if (searchOutcome === "no-results") {
         console.log("    VipCars returned no available cars for this date/time.");
         return { ok: true, cheapest: null, results: [] };
       }
       if (this.config.transmission !== "any") {
-        await this.applyAutomaticTransmissionFilter(page);
+        await diagnostics.measure("automatic_filter", () => bounded(this.applyAutomaticTransmissionFilter(page, waitOptions)));
       }
-      await this.loadSearchResultCards(page);
-      const offers = await this.extractSearchOffers(page, location);
+      await diagnostics.measure("load_cards", () => bounded(this.loadSearchResultCards(page, waitOptions)));
+      const offers = await diagnostics.measure("extract", () => bounded(this.extractSearchOffers(page, location)));
       if (!offers.length) {
         return { ok: true, cheapest: null, results: [] };
       }
@@ -107,18 +173,28 @@ class VipCarsScraper {
       const selected = selectBestOffersByProvider(offers, this.config.maxProvidersPerLocation);
       return { ok: true, cheapest: selected[0], results: selected };
     } catch (error) {
-      await this.captureFailureArtifacts(page, location);
+      if (expired || Date.now() >= deadlineAt) {
+        error = new Error(`Search attempt timeout exceeded (${attemptBudgetMs}ms maximum).`);
+        error.name = "TimeoutError";
+        error.code = "ATTEMPT_TIMEOUT";
+      }
+      error.message = sanitizeMessage(error.message);
+      await this.captureFailureArtifacts(page, location, diagnostics.snapshot(error)).catch((artifactError) => {
+        console.warn(`Could not save failure artifacts: ${sanitizeMessage(artifactError.message)}`);
+      });
       return { ok: false, error };
     } finally {
-      await context.close();
+      clearTimeout(watchdog);
+      diagnostics.detach();
+      if (context) await settleWithin(context.close().catch(() => {}), 2000);
+      const timing = diagnostics.snapshot();
+      console.log(`TIMING ${location} attempt=${attempt} total_ms=${timing.elapsed_ms} `
+        + timing.stages.map((stage) => `${stage.name}=${stage.elapsed_ms}ms/${stage.status}`).join(" "));
     }
   }
 
-  async waitForSearchOutcome(page) {
-    await page.waitForSelector(`.scv-car-box, ${NO_RESULTS_SELECTOR}`, {
-      timeout: this.config.timeoutMs
-    });
-    return await page.locator(".scv-car-box").count() > 0 ? "results" : "no-results";
+  async waitForSearchOutcome(page, options = {}) {
+    return readiness.waitForSearchOutcome(page, { timeoutMs: this.config.timeoutMs, ...options });
   }
 
   buildSearchUrl(location) {
@@ -162,99 +238,18 @@ class VipCarsScraper {
     ]).catch(() => {});
   }
 
-  async loadSearchResultCards(page) {
-    let previousCardCount = 0;
-    let stableRounds = 0;
-
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      const state = await page.evaluate(() => {
-        const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
-        const isAutomaticCard = (card) => {
-          const specsText = normalize(card.querySelector(".scv-car-specs")?.textContent || "");
-          const carName = normalize(
-            card.querySelector(".scv-car-name")?.textContent ||
-            card.querySelector(".scv-car-img img[alt]")?.getAttribute("alt") ||
-            ""
-          );
-          return Boolean(card.querySelector(".scv-car-specs .scv-icon.autom")) ||
-            /\bautomatic\b/i.test(`${specsText} ${carName}`);
-        };
-        const cards = Array.from(document.querySelectorAll(".scv-car-box"));
-        const automaticCards = cards.filter(isAutomaticCard);
-        const providers = new Set(automaticCards
-          .map((card) => normalize(
-            card.querySelector(".scv-supp-info img[alt], img[id^='supplier_']")?.getAttribute("alt") ||
-            card.querySelector(".scv-supp-info h5")?.textContent ||
-            ""
-          ))
-          .filter(Boolean));
-        const totalText = document.getElementById("car_count_data")?.value || document.getElementById("car_count")?.value || "";
-        const totalCount = Number.parseInt(totalText, 10);
-
-        return {
-          cardCount: cards.length,
-          automaticCardCount: automaticCards.length,
-          providerCount: providers.size,
-          totalCount: Number.isFinite(totalCount) ? totalCount : null
-        };
-      });
-
-      if (Number.isFinite(state.totalCount) && state.cardCount >= state.totalCount) {
-        break;
-      }
-
-      stableRounds = state.cardCount === previousCardCount ? stableRounds + 1 : 0;
-      if (stableRounds >= 2) {
-        break;
-      }
-      previousCardCount = state.cardCount;
-
-      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-      await page.waitForFunction(
-        ({ previousCount }) => {
-          const cards = Array.from(document.querySelectorAll(".scv-car-box"));
-          return cards.length > previousCount;
-        },
-        { previousCount: state.cardCount },
-        { timeout: Math.min(this.config.timeoutMs, 10000) }
-      ).catch(() => {});
-    }
+  async loadSearchResultCards(page, options = {}) {
+    return readiness.loadSearchResultCards(page, { timeoutMs: this.config.timeoutMs, ...options });
   }
 
-  async applyAutomaticTransmissionFilter(page) {
-    const filter = page.locator("#filter_automatic");
-    if (!(await filter.count().catch(() => 0))) {
-      console.log("    Automatic transmission filter: not found; filtering extracted cards only.");
-      return false;
-    }
-
-    if (!(await filter.isChecked().catch(() => false))) {
-      try {
-        await filter.check({ force: true });
-      } catch (error) {
-        try {
-          await page.locator("label", { has: filter }).click({ force: true });
-        } catch (fallbackError) {
-          console.log("    Automatic transmission filter: could not be clicked; filtering extracted cards only.");
-          return false;
-        }
-      }
-    }
-
-    await page.waitForFunction(() => {
-      const automaticFilter = document.getElementById("filter_automatic");
-      const busy = document.getElementById("page_busy")?.value || "";
-      const cards = Array.from(document.querySelectorAll(".scv-car-box"));
-      return automaticFilter?.checked && busy !== "1" && cards.length > 0;
-    }, null, { timeout: Math.min(this.config.timeoutMs, 15000) }).catch(() => {});
-
-    if (await filter.isChecked().catch(() => false)) {
-      console.log("    Automatic transmission filter: applied.");
-      return true;
-    }
-
-    console.log("    Automatic transmission filter: not confirmed; filtering extracted cards only.");
-    return false;
+  async applyAutomaticTransmissionFilter(page, options = {}) {
+    const applied = await readiness.applyAutomaticTransmissionFilter(page, {
+      timeoutMs: this.config.timeoutMs, ...options
+    });
+    console.log(applied
+      ? "    Automatic transmission filter: applied."
+      : "    Automatic transmission filter: unavailable; filtering extracted cards only.");
+    return applied;
   }
 
   async extractSearchOffers(page, fallbackLocation) {
@@ -327,17 +322,32 @@ class VipCarsScraper {
     return dedupeOffers(offers);
   }
 
-  async captureFailureArtifacts(page, location) {
+  async captureFailureArtifacts(page, location, diagnostics = {}) {
     const scenarioName = `${this.config.pickupDate}-${this.config.currentDurationDays}d-${location}`;
-    const baseName = safeFilePart(scenarioName) || "location";
-    await page.screenshot({
+    const baseName = `${safeFilePart(scenarioName) || "location"}-attempt-${diagnostics.attempt || 1}`;
+    ensureDir(this.config.artifactsDir);
+    writeTextFile(path.join(this.config.artifactsDir, `${baseName}.json`), JSON.stringify(diagnostics, null, 2));
+    if (!page) return;
+    await settleWithin(page.screenshot({
       path: path.join(this.config.artifactsDir, `${baseName}.png`),
-      fullPage: true
-    }).catch(() => {});
-    const html = await page.content().catch(() => "");
+      fullPage: true, timeout: 2000
+    }).catch(() => {}), 2000);
+    const html = await settleWithin(page.content().catch(() => ""), 2000);
     if (html) {
       writeTextFile(path.join(this.config.artifactsDir, `${baseName}.html`), html);
     }
+  }
+}
+
+async function settleWithin(operation, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise((resolve) => { timer = setTimeout(() => resolve(undefined), timeoutMs); })
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

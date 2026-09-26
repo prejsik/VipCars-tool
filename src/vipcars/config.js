@@ -92,6 +92,16 @@ function parseOptionalPositiveInteger(rawValue, fieldName) {
   return parsed;
 }
 
+function parsePositiveFiniteNumber(rawValue, fieldName, fallback) {
+  const value = rawValue == null || normalizeWhitespace(rawValue) === ""
+    ? fallback
+    : Number(rawValue);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${fieldName} must be a positive finite number. Received: ${rawValue}`);
+  }
+  return value;
+}
+
 function normalizeVehicleCategory(rawValue) {
   const normalized = normalizeWhitespace(rawValue).toLowerCase().replace(/[\s/-]+/g, "_");
   if (!normalized) {
@@ -274,6 +284,16 @@ function loadConfig(argv) {
     ? [...new Set(pickupWeekdays)].map((weekday) => nearestWeekdayDateFromNow(weekday, pickupTime)).sort()
     : [pickupDate];
   const pickupDateOptions = chunkValues(allPickupDateOptions, pickupChunkIndex || 1, pickupChunkTotal);
+  const jobBudgetMs = parsePositiveFiniteNumber(
+    cli.jobBudgetMs ?? cli["job-budget-ms"] ?? fileConfig.jobBudgetMs ?? fileConfig["job-budget-ms"],
+    "jobBudgetMs",
+    170 * 60 * 1000
+  );
+  const attemptBudgetMs = parsePositiveFiniteNumber(
+    cli.attemptBudgetMs ?? cli["attempt-budget-ms"] ?? fileConfig.attemptBudgetMs ?? fileConfig["attempt-budget-ms"],
+    "attemptBudgetMs",
+    90000
+  );
 
   return {
     baseUrl: normalizeWhitespace(merged.baseUrl || "https://www.vipcars.com"),
@@ -294,6 +314,8 @@ function loadConfig(argv) {
     driverAge: Number.parseInt(merged.driverAge || merged["driver-age"] || "30", 10),
     maxProvidersPerLocation: Number.parseInt(merged.maxProvidersPerLocation || "25", 10),
     timeoutMs: Number.parseInt(merged.timeoutMs || merged["timeout-ms"] || "45000", 10),
+    attemptBudgetMs,
+    jobBudgetMs,
     locationConcurrency: Number.parseInt(merged.locationConcurrency || merged["location-concurrency"] || "1", 10),
     headless: merged.headless !== false,
     outputCsv: path.resolve(
@@ -343,6 +365,8 @@ Options:
   --pickup-chunk-total 3
   --pickup-weekdays "thursday,friday"
   --durations-days "2,3"
+  --attempt-budget-ms 90000
+  --job-budget-ms 10200000
   --output-csv PATH
   --output-coverage PATH
   --headed

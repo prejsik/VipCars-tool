@@ -49,6 +49,16 @@ On September 11-15, 2026, GitHub delivered the old 02:30 trigger about 4 hours 1
 
 The daily scan still checks all seven locations, 60 rolling pickup dates and rental durations from 2 to 14 days, in EUR with automatic transmission. Since pickup is at 10:00, an evening run starts its pickup plan on the following day; a run delayed past midnight keeps that same first date until 10:00. The plan is fixed in the prepare job and shared by all 60 chunks. An evening start means prices may be collected the previous evening or during the night.
 
+## Scraper reliability
+
+Each CLI process (one workflow chunk) owns one Chromium browser and opens an isolated context for every search attempt. The first pass attempts every planned check once. At most two subsequent recovery passes retry eligible failures, with a shared limit of three attempts per location/date/duration check. Successful checks are not repeated.
+
+Navigation and initial result detection retain the configured `timeoutMs` (45 seconds by default). The entire attempt, including paginated results, has a shared 90-second budget (`--attempt-budget-ms`), capped by the remaining job budget. A live Warsaw check was still loading at 160 of 261 cards after 45 seconds, so that shorter total limit would truncate a valid search. Failure-artifact capture and context cleanup have separate short limits. The CLI has a 170-minute job budget (`--job-budget-ms`), leaving time before the workflow's 180-minute limit to save results and coverage. Unfinished checks remain explicitly incomplete, never valid empty results. Checkpoints are saved after each location.
+
+Results require a verified complete result state; an unchanged card count alone is not evidence of completeness. Failure artifacts have separate attempt numbers and include stage timings, selected network events and JavaScript errors. Diagnostic JSON excludes URL query parameters, request bodies, headers and cookies. HTML and screenshots remain workflow debugging artifacts and are not sanitized; treat downloaded artifacts accordingly. The publish job installs Node dependencies independently of the scrape jobs.
+
+Install the test browser with `npx playwright install chromium`, then run `npm run test:all` for the offline regression suite, including local Chromium result-page fixtures. These tests do not send Telegram messages or query live rental offers. They verify retry, deadline and completeness behavior, not a guaranteed live-site response time.
+
 ## Telegram notification
 
 The workflow sends a Telegram message after the GitHub Pages report is deployed, when these repository secrets are set:

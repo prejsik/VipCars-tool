@@ -774,7 +774,7 @@ runAsyncTest("VipCars loads beyond the first four providers", async () => {
       stateIndex += 1;
       return state;
     },
-    waitForFunction: async () => undefined
+    waitForTimeout: async () => undefined
   };
 
   await scraper.loadSearchResultCards(page);
@@ -783,19 +783,11 @@ runAsyncTest("VipCars loads beyond the first four providers", async () => {
 
 runAsyncTest("VipCars recognizes an explicit no-results page", async () => {
   const scraper = new VipCarsScraper({ timeoutMs: 45000 });
-  let waitedFor = "";
   const page = {
-    waitForSelector: async (selector) => {
-      waitedFor = selector;
-    },
-    locator: (selector) => ({
-      count: async () => selector === ".scv-car-box" ? 0 : 1
-    })
+    evaluate: async () => ({ cardCount: 0, totalCount: null, noResults: true, busy: false })
   };
 
   const outcome = await scraper.waitForSearchOutcome(page);
-  assert.match(waitedFor, /\.scv-car-box/);
-  assert.match(waitedFor, /No Results Found/);
   assert.equal(outcome, "no-results");
 });
 
