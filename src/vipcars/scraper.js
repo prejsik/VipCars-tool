@@ -5,6 +5,7 @@ const { createAttemptDiagnostics, sanitizeMessage } = require("./diagnostics");
 const readiness = require("./resultReadiness");
 const { validatePageSearch } = require("./searchContract");
 const transport = require("./resultTransport");
+const { createResultRequestGate } = require("./requestThrottle");
 const { readOfferCards, parseOfferPage } = require("./offerCards");
 const {
   ensureDir,
@@ -22,6 +23,7 @@ class VipCarsScraper {
   constructor(config) {
     this.config = config;
     this.attemptCounts = new Map();
+    this.cooldown = { until: 0 };
   }
 
   async run(onProgress, options = {}) {
@@ -68,18 +70,32 @@ class VipCarsScraper {
     const maxAttempts = options.maxAttemptsPerCheck ?? MAX_TIMEOUT_RETRIES + 1;
     const passAttempts = options.attemptsPerPass ?? maxAttempts;
     const deadlineAt = options.deadlineAt ?? Infinity;
+    const cooldown = options.cooldown || this.cooldown;
     let outcome;
     for (let pass = 0; pass < passAttempts; pass += 1) {
       const attempts = counts.get(key) || 0;
-      if (Date.now() >= deadlineAt || attempts >= maxAttempts) {
-        const code = Date.now() >= deadlineAt ? "JOB_DEADLINE" : "ATTEMPT_LIMIT";
-        const error = new Error(`${code}: no further search attempt allowed.`);
-        error.code = code;
-        return { ok: false, error, attempts, retryable: false };
+      let waiting = false;
+      while (true) {
+        if (Date.now() >= deadlineAt || attempts >= maxAttempts) {
+          const code = Date.now() >= deadlineAt ? "JOB_DEADLINE" : "ATTEMPT_LIMIT";
+          const error = new Error(`${code}: no further search attempt allowed.`);
+          error.code = code;
+          return { ok: false, error, attempts, retryable: false };
+        }
+        if (cooldown.until <= Date.now()) break;
+        if (cooldown.until >= deadlineAt) {
+          const error = new Error(`VipCars server cooldown until ${new Date(cooldown.until).toISOString()} exceeds this job's remaining time.`);
+          error.code = "SERVER_COOLDOWN";
+          error.retryAt = cooldown.until;
+          return { ok: false, error, attempts, retryable: false };
+        }
+        if (!waiting) console.log(`WAIT VipCars server cooldown until ${new Date(cooldown.until).toISOString()}`);
+        waiting = true;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(60000, cooldown.until - Date.now())));
       }
       counts.set(key, attempts + 1);
       outcome = await this.runSingleLocation(browser, location, {
-        attempt: attempts + 1, deadlineAt
+        attempt: attempts + 1, deadlineAt, cooldown, onCooldown: options.onCooldown
       });
       outcome.attempts = attempts + 1;
       outcome.retryable = !outcome.ok && outcome.attempts < maxAttempts
@@ -95,8 +111,16 @@ class VipCarsScraper {
   }
 
   async runSingleLocation(browser, location, options = {}) {
+    const cooldown = options.cooldown || this.cooldown;
+    if (cooldown.until > Date.now()) {
+      const error = new Error(`VipCars server cooldown until ${new Date(cooldown.until).toISOString()}.`);
+      error.code = "SERVER_COOLDOWN";
+      error.retryAt = cooldown.until;
+      error.retryable = true;
+      return { ok: false, error };
+    }
     const attempt = options.attempt || 1;
-    const attemptBudgetMs = this.config.attemptBudgetMs || 90000;
+    const attemptBudgetMs = this.config.attemptBudgetMs || 180000;
     const deadlineAt = Math.min(options.deadlineAt ?? Infinity, Date.now() + attemptBudgetMs);
     const remaining = () => Math.max(1, deadlineAt - Date.now());
     const diagnostics = createAttemptDiagnostics({
@@ -106,11 +130,14 @@ class VipCarsScraper {
     let context;
     let page;
     let initialResults;
+    let filteredResults;
+    let detachResultFailures;
     const allowedResultUrls = new Set();
     let expired = false;
     let rejectDeadline;
     const deadline = new Promise((resolve, reject) => { rejectDeadline = reject; });
     const bounded = (operation) => Promise.race([operation, deadline]);
+    const resultRequestGate = createResultRequestGate(cooldown, deadlineAt);
     const watchdog = setTimeout(() => {
       expired = true;
       rejectDeadline(new Error("Search attempt deadline reached."));
@@ -133,10 +160,10 @@ class VipCarsScraper {
       await bounded(this.configureCurrency(context));
       await bounded(context.route("**/*", async (route) => {
         const type = route.request().resourceType();
-        const resultRequest = transport.parseResultRequest(route.request().url());
-        if (this.config.networkResults && resultRequest && resultRequest.params.get("offset") !== "0") {
+        const resultRequest = transport.parseResultRequest(route.request().url(), { includeFiltered: true });
+        if (this.config.networkResults && resultRequest && resultRequest.params.has("offset") && resultRequest.params.get("offset") !== "0") {
           if (!transport.allowPaginationRequest(route.request(), allowedResultUrls)) {
-            await route.abort().catch(() => {});
+            await route.abort("aborted").catch(() => {});
             return;
           }
         }
@@ -144,12 +171,34 @@ class VipCarsScraper {
           await route.abort().catch(() => {});
           return;
         }
-        await route.continue().catch(() => {});
+        if (resultRequest && route.request().method() === "GET") {
+          try { await resultRequestGate(() => route.continue()); }
+          catch (error) {
+            rejectDeadline(error);
+            await route.abort().catch(() => {});
+          }
+        } else await route.continue().catch(() => {});
       }));
 
       page = await bounded(context.newPage());
       diagnostics.attach(page);
-      if (this.config.networkResults) initialResults = transport.captureInitialResults(page);
+      const resultFailures = transport.observeResultFailures(page, (error) => {
+        if (Number.isFinite(error.retryAt) && error.retryAt > cooldown.until) {
+          cooldown.until = error.retryAt;
+          try { options.onCooldown?.(); }
+          catch (checkpointError) {
+            rejectDeadline(checkpointError);
+            return;
+          }
+        }
+        rejectDeadline(error);
+      });
+      detachResultFailures = resultFailures.detach;
+      await bounded(resultFailures.ready);
+      if (this.config.networkResults) {
+        initialResults = transport.captureInitialResults(page);
+        if (this.config.transmission !== "any") filteredResults = transport.captureInitialResults(page, { filtered: true });
+      }
       page.setDefaultTimeout(remaining());
       page.setDefaultNavigationTimeout(remaining());
 
@@ -175,16 +224,18 @@ class VipCarsScraper {
         console.log("    VipCars returned no available cars for this date/time.");
         return { ok: true, cheapest: null, results: [] };
       }
-      const captured = await bounded(initialResults?.read());
-      if (this.config.networkResults && !captured) throw transport.transportError("Initial result response was not captured.", true);
+      let automaticApplied = false;
+      if (this.config.transmission !== "any") {
+        automaticApplied = await diagnostics.measure("automatic_filter", () => bounded(this.applyAutomaticTransmissionFilter(page, waitOptions)));
+      }
       let raw;
-      if (captured) {
+      if (this.config.networkResults) {
+        const filteredEmpty = automaticApplied && await bounded(this.waitForSearchOutcome(page, waitOptions)) === "no-results";
+        const captured = await bounded((automaticApplied ? filteredResults : initialResults).read());
+        if (!captured) throw transport.transportError("Initial result response was not captured.", true);
         raw = await diagnostics.measure("network_offers", () => bounded(this.loadNetworkOffers(
-          context, page, captured, location, { ...waitOptions, allowedResultUrls })));
+          context, page, captured, location, { ...waitOptions, allowedResultUrls, resultFailures, filteredEmpty })));
       } else {
-        if (this.config.transmission !== "any") {
-          await diagnostics.measure("automatic_filter", () => bounded(this.applyAutomaticTransmissionFilter(page, waitOptions)));
-        }
         await diagnostics.measure("load_cards", () => bounded(this.loadSearchResultCards(page, waitOptions)));
       }
       await diagnostics.measure("final_search_contract", () => bounded(validatePageSearch(page, this.buildSearchUrl(location))));
@@ -208,7 +259,9 @@ class VipCarsScraper {
       return { ok: false, error };
     } finally {
       clearTimeout(watchdog);
+      if (detachResultFailures) await settleWithin(detachResultFailures(), 1000);
       initialResults?.detach();
+      filteredResults?.detach();
       diagnostics.detach();
       if (context) await settleWithin(context.close().catch(() => {}), 2000);
       const timing = diagnostics.snapshot();
@@ -278,9 +331,39 @@ class VipCarsScraper {
 
   async loadNetworkOffers(context, page, captured, location, options) {
     transport.validateResultRequest(captured.source, this.buildSearchUrl(location));
+    const filtered = captured.source.params.get("load_type") === "get_result_desktop_filter";
+    if (filtered) {
+      const specs = captured.source.params.getAll("specs_checks");
+      const otherFilters = ["supplier_checks", "class_checks", "fuel_checks", "location_checks", "excess_checks",
+        "deposit_checks", "seat_checks", "mileage_checks", "fuel_policy_checks", "payment_type_checks"];
+      if (specs.length !== 1 || specs[0] !== "automatic"
+          || otherFilters.some((field) => captured.source.params.getAll(field).some(Boolean))) {
+        throw transport.transportError("Automatic result request contains unexpected filters.");
+      }
+      const ranges = captured.source.params.getAll("price_range");
+      const limits = await page.evaluate(() => Array.from(document.querySelectorAll("#price_range"))
+        .map((element) => [element.getAttribute("data-slider-min"), element.getAttribute("data-slider-max")]));
+      const number = (value) => /^\d+(?:\.\d+)?$/.test(String(value ?? "").trim()) ? Number(value) : NaN;
+      const requestedRange = ranges.length === 1 ? ranges[0].split(",").map(number) : [];
+      const fullRange = limits.length === 1 ? limits[0].map(number) : [];
+      if (requestedRange.length !== 2 || fullRange.length !== 2
+          || ![...requestedRange, ...fullRange].every(Number.isFinite)
+          || fullRange[0] > fullRange[1]
+          || requestedRange.some((value, index) => value !== fullRange[index])) {
+        throw transport.transportError("Automatic result request does not use the full price range.");
+      }
+    }
+    if (options.filteredEmpty) return [];
     const parserPage = await context.newPage();
     try {
-      const initial = await parseOfferPage(parserPage, captured.html, location);
+      const parsePage = async (html) => {
+        const batch = await parseOfferPage(parserPage, html, location);
+        if (filtered && batch.cards.some((card) => !card.automatic)) {
+          throw transport.transportError("Non-automatic offer in an automatic result page.");
+        }
+        return batch;
+      };
+      const initial = await parsePage(captured.html);
       const visible = await page.evaluate(readOfferCards, { location });
       transport.compareVisibleCards(initial.cards, visible);
       const visibleCounts = await page.evaluate(() => ["car_count_data", "car_count"]
@@ -296,13 +379,14 @@ class VipCarsScraper {
         fetchPage: async (url, timeout) => {
           try {
             options.allowedResultUrls.add(url);
-            const response = await transport.fetchResultPage(page, url, timeout, captured.source.headers);
+            const response = await options.resultFailures.correlate(url, () =>
+              transport.fetchResultPage(page, url, timeout, captured.source.headers));
             if (response.status !== 200) {
               throw transport.transportError(`Result page HTTP ${response.status}.`, response.status >= 500);
             }
-            return await parseOfferPage(parserPage, response.html, location);
+            return await parsePage(response.html);
           } catch (error) {
-            if (error.code === "RESULT_TRANSPORT_INVALID") throw error;
+            if (["RESULT_TRANSPORT_INVALID", "SERVER_COOLDOWN", "ATTEMPT_TIMEOUT"].includes(error.code)) throw error;
             throw transport.transportError("Result page fetch or parsing failed.", true);
           } finally {
             options.allowedResultUrls.delete(url);

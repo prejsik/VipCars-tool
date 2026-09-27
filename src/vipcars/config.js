@@ -300,7 +300,7 @@ function loadConfig(argv) {
   const attemptBudgetMs = parsePositiveFiniteNumber(
     cli.attemptBudgetMs ?? cli["attempt-budget-ms"] ?? fileConfig.attemptBudgetMs ?? fileConfig["attempt-budget-ms"],
     "attemptBudgetMs",
-    90000
+    180000
   );
   const outputCoverage = path.resolve(
     cli.outputCoverage ||
@@ -377,7 +377,7 @@ Options:
   --pickup-chunk-total 3
   --pickup-weekdays "thursday,friday"
   --durations-days "2,3"
-  --attempt-budget-ms 90000
+  --attempt-budget-ms 180000
   --job-budget-ms 10200000
   --resume
   --network-results  Experimental response pagination (not enabled by default)

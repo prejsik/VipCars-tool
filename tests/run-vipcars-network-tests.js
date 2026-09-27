@@ -13,6 +13,33 @@ params.set("key", "private-test-session");
 const url = `https://be.supplycars.com/be1/node.php?${JSON.stringify(`&${params}`)}`;
 const card = (id) => ({ cardId: String(id), provider: "MM Cars Rental", priceText: "EUR 30.00", payNowText: "Pay Now EUR 3.00", automatic: true });
 
+function resultUrl(loadType, offset = 0, carPage = 0) {
+  const requestParams = new URLSearchParams(params);
+  requestParams.set("load_type", loadType);
+  requestParams.set("offset", String(offset));
+  requestParams.set("car_page", String(carPage));
+  return `https://be.supplycars.com/be1/node.php?${JSON.stringify(`&${requestParams}`)}`;
+}
+
+function plainResultUrl(loadType, { offset, carPage } = {}) {
+  const requestParams = new URLSearchParams(params);
+  requestParams.set("load_type", loadType);
+  requestParams.delete("offset");
+  requestParams.delete("car_page");
+  if (offset !== undefined) requestParams.set("offset", String(offset));
+  if (carPage !== undefined) requestParams.set("car_page", String(carPage));
+  return `https://be.supplycars.com/be1/node.php?${requestParams}`;
+}
+
+function mockResponse(requestUrl, html, headers = {}, status = 200) {
+  return {
+    url: () => requestUrl,
+    status: () => status,
+    text: async () => html,
+    request: () => ({ method: () => "GET", postData: () => null, headers: () => headers })
+  };
+}
+
 async function main() {
   const configArgs = ["--config", "vipcars.config.example.json"];
   assert.equal(loadConfig(configArgs).networkResults, false);
@@ -27,6 +54,82 @@ async function main() {
   await assert.rejects(captured.read(), (error) => error.retryable === false);
   captured.detach();
   assert.equal(page.listenerCount("response"), 0);
+
+  const observedHeaders = {
+    accept: "text/html, */*; q=0.01",
+    "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "cache-control": "no-cache",
+    origin: "https://www.vipcars.com",
+    referer: expected.href,
+    "user-agent": "offline-test-browser",
+    cookie: "private-cookie",
+    authorization: "private-authorization",
+    "x-private": "private-header"
+  };
+  const safeHeaders = Object.fromEntries([
+    "accept", "content-type", "cache-control", "origin", "referer", "user-agent"
+  ].map((name) => [name, observedHeaders[name]]));
+  const unfilteredFirstUrl = resultUrl("get_result_desktop", 0, 0);
+  const filteredNextUrl = resultUrl("get_result_desktop_filter", 10, 1);
+  const filteredFirstUrl = resultUrl("get_result_desktop_filter", 0, 0);
+
+  const filteredPage = new EventEmitter();
+  const filteredCapture = captureInitialResults(filteredPage, { filtered: true });
+  filteredPage.emit("response", mockResponse(unfilteredFirstUrl, "unfiltered-zero"));
+  filteredPage.emit("response", mockResponse(filteredNextUrl, "filtered-next-page"));
+  filteredPage.emit("response", mockResponse(filteredFirstUrl, "first-filtered", observedHeaders));
+  filteredPage.emit("response", mockResponse(filteredFirstUrl, "second-filtered"));
+  const filteredResult = await filteredCapture.read();
+  assert.equal(filteredResult.html, "first-filtered");
+  assert.equal(filteredResult.source.params.get("load_type"), "get_result_desktop_filter");
+  assert.equal(filteredResult.source.params.get("offset"), "0");
+  assert.equal(filteredResult.source.params.get("pickup_loc"), expected.searchParams.get("pickup_location"));
+  assert.equal(filteredResult.source.params.get("currency"), "EUR");
+  validateResultRequest(filteredResult.source, expected.href);
+  assert.deepEqual(filteredResult.source.headers, safeHeaders);
+  filteredCapture.detach();
+  assert.equal(filteredPage.listenerCount("response"), 0);
+
+  const implicitFilteredUrl = plainResultUrl("get_result_desktop_filter");
+  const implicitFilteredPage = new EventEmitter();
+  const implicitFilteredCapture = captureInitialResults(implicitFilteredPage, { filtered: true });
+  implicitFilteredPage.emit("response", mockResponse(implicitFilteredUrl, "implicit-filtered"));
+  const implicitFilteredResult = await implicitFilteredCapture.read();
+  assert.equal(implicitFilteredResult.html, "implicit-filtered");
+  assert.equal(implicitFilteredResult.source.params.has("offset"), false);
+  assert.equal(implicitFilteredResult.source.params.has("car_page"), false);
+  assert.doesNotThrow(() => validateResultRequest(implicitFilteredResult.source, expected.href));
+  const implicitNextUrl = requestUrl(implicitFilteredResult.source, 10, 1);
+  assert.equal(implicitNextUrl, `${implicitFilteredUrl}&offset=10&car_page=1`);
+  assert.equal(parseResultRequest(implicitNextUrl, { includeFiltered: true }).params.get("offset"), "10");
+  implicitFilteredCapture.detach();
+  assert.equal(implicitFilteredPage.listenerCount("response"), 0);
+
+  for (const partialUrl of [
+    plainResultUrl("get_result_desktop_filter", { carPage: 0 }),
+    plainResultUrl("get_result_desktop_filter", { offset: 0 })
+  ]) {
+    const partial = parseResultRequest(partialUrl, { includeFiltered: true });
+    assert.ok(partial);
+    assert.throws(() => validateResultRequest(partial, expected.href), /first page/i);
+  }
+  const implicitUnfiltered = parseResultRequest(plainResultUrl("get_result_desktop"));
+  assert.ok(implicitUnfiltered);
+  assert.throws(() => validateResultRequest(implicitUnfiltered, expected.href), /first page/i);
+
+  const defaultPage = new EventEmitter();
+  const defaultCapture = captureInitialResults(defaultPage);
+  defaultPage.emit("response", mockResponse(filteredFirstUrl, "filtered-zero"));
+  defaultPage.emit("response", mockResponse(unfilteredFirstUrl, "first-unfiltered"));
+  defaultPage.emit("response", mockResponse(unfilteredFirstUrl, "second-unfiltered"));
+  const defaultResult = await defaultCapture.read();
+  assert.equal(defaultResult.html, "first-unfiltered");
+  assert.equal(defaultResult.source.params.get("load_type"), "get_result_desktop");
+  assert.equal(defaultResult.source.params.get("offset"), "0");
+  validateResultRequest(defaultResult.source, expected.href);
+  defaultCapture.detach();
+  assert.equal(defaultPage.listenerCount("response"), 0);
+
   const allowed = new Set(["https://example.test/page"]);
   const request = (method) => ({ method: () => method, url: () => "https://example.test/page" });
   assert.equal(allowPaginationRequest(request("POST"), allowed), false);

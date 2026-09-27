@@ -39,9 +39,8 @@ async function main(argv = process.argv.slice(2)) {
     const resultKeys = new Set(allResults.map(resultKey));
     const failuresByCheck = new Map();
     const coverageRows = runState.coverageRows;
-    const attemptCounts = new DurableAttemptMap(runState.attemptCounts, () => {
-      saveRunState(config.resumeStatePath, runState);
-    });
+    const persistRunState = () => saveRunState(config.resumeStatePath, runState);
+    const attemptCounts = new DurableAttemptMap(runState.attemptCounts, persistRunState);
     runState.attemptCounts = attemptCounts;
     const deadlineAt = Date.parse(runState.startedAt) + config.jobBudgetMs;
     saveCheckpoint(config, allResults, coverageRows, runState);
@@ -73,7 +72,7 @@ async function main(argv = process.argv.slice(2)) {
               appendUniqueResults(allResults, resultKeys, results);
               applyScenarioChecks(coverageRows, pickupDate, durationDays, checks);
               saveCheckpoint(config, allResults, coverageRows, runState);
-            }, runOptions(browser, attemptCounts, deadlineAt));
+            }, runOptions(browser, attemptCounts, deadlineAt, runState.cooldown, persistRunState));
             checkpointOutcome({
               config,
               allResults,
@@ -118,7 +117,7 @@ async function main(argv = process.argv.slice(2)) {
               appendUniqueResults(allResults, resultKeys, recoveryResults);
               applyScenarioChecks(coverageRows, pickupDate, durationDays, recoveryChecks);
               saveCheckpoint(config, allResults, coverageRows, runState);
-            }, runOptions(browser, attemptCounts, deadlineAt));
+            }, runOptions(browser, attemptCounts, deadlineAt, runState.cooldown, persistRunState));
             checkpointOutcome({
               config,
               allResults,
@@ -161,10 +160,12 @@ async function main(argv = process.argv.slice(2)) {
   }
 }
 
-function runOptions(browser, attemptCounts, deadlineAt) {
+function runOptions(browser, attemptCounts, deadlineAt, cooldown, onCooldown) {
   return {
     browser,
     attemptCounts,
+    cooldown,
+    onCooldown,
     maxAttemptsPerCheck: MAX_ATTEMPTS_PER_CHECK,
     attemptsPerPass: 1,
     deadlineAt

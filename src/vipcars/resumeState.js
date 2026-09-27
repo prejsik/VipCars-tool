@@ -14,7 +14,8 @@ function createRunState(config, now = Date.now()) {
     fingerprint: createFingerprint(config),
     results: [],
     coverageRows: createCoveragePlan(config),
-    attemptCounts: new Map()
+    attemptCounts: new Map(),
+    cooldown: { until: 0 }
   };
 }
 
@@ -57,6 +58,10 @@ function loadRunState(targetPath, config, now = Date.now()) {
   const results = validateResults(stored.results, coverageRows, config);
   const attemptCounts = validateAttemptCounts(stored.attempt_counts, coverageRows);
   validateCoverageResults(coverageRows, results);
+  const cooldownUntil = stored.cooldown_until ?? 0;
+  if (!Number.isSafeInteger(cooldownUntil) || cooldownUntil < 0 || cooldownUntil > 8640000000000000) {
+    throw new Error("Resume checkpoint cooldown_until is invalid.");
+  }
 
   return {
     runId: stored.run_id,
@@ -64,7 +69,8 @@ function loadRunState(targetPath, config, now = Date.now()) {
     fingerprint,
     results,
     coverageRows,
-    attemptCounts
+    attemptCounts,
+    cooldown: { until: cooldownUntil }
   };
 }
 
@@ -80,7 +86,8 @@ function saveRunState(targetPath, state) {
     fingerprint: state.fingerprint,
     results: state.results,
     coverage: state.coverageRows,
-    attempt_counts: attemptCounts
+    attempt_counts: attemptCounts,
+    cooldown_until: state.cooldown?.until || 0
   };
   fs.mkdirSync(path.dirname(targetPath), { recursive: true });
   const temporaryPath = `${targetPath}.${process.pid}.${randomUUID()}.tmp`;

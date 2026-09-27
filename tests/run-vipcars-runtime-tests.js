@@ -20,6 +20,180 @@ async function main() {
     pickup_time: "10:00", dropoff_time: "10:00", currency: "EUR"
   }, missing: [], currencyValues: ["EUR"] });
   const cases = [];
+  cases.push(["CORS-hidden Retry-After pauses later scenarios without consuming another attempt", async () => {
+    const page = new EventEmitter();
+    const cdp = new EventEmitter();
+    let detached = false;
+    cdp.send = async () => {};
+    cdp.detach = async () => { detached = true; cdp.removeAllListeners(); };
+    page.context = () => ({ newCDPSession: async () => cdp });
+    page.setDefaultTimeout = () => {};
+    page.setDefaultNavigationTimeout = () => {};
+    page.goto = async () => ({ status: () => 200 });
+    page.evaluate = async () => contractSnapshot();
+    const context = { addCookies: async () => {}, route: async () => {},
+      newPage: async () => page, close: async () => {} };
+    const shared = { until: 0 };
+    let persisted = 0;
+    const scraper = new VipCarsScraper({ ...config, baseUrl: "https://www.vipcars.com", transmission: "any" });
+    scraper.waitForSearchOutcome = async () => "results";
+    scraper.captureFailureArtifacts = async () => {};
+    scraper.loadSearchResultCards = () => new Promise(() => {
+      const url = "https://be.supplycars.com/be1/node.php?load_type=get_result_desktop_filter&offset=300";
+      const request = { url: () => url, resourceType: () => "xhr", failure: () => ({ errorText: "net::ERR_FAILED" }) };
+      // Extra info can precede request metadata; neither event order may lose the cooldown.
+      cdp.emit("Network.responseReceivedExtraInfo", { requestId: "result", statusCode: 400,
+        headers: { "Retry-After": "1769", "Set-Cookie": "private-test-cookie" } });
+      cdp.emit("Network.requestWillBeSent", { requestId: "result", request: { url, method: "GET" } });
+      page.emit("requestfailed", request);
+    });
+    const start = Date.now();
+    const outcome = await scraper.runSingleLocation({ newContext: async () => context }, "Warsaw", {
+      cooldown: shared, onCooldown: () => { persisted = shared.until; }
+    });
+    assert.equal(outcome.error.code, "SERVER_COOLDOWN");
+    assert.ok(shared.until >= start + 1769000);
+    assert.equal(persisted, shared.until, "the cooldown must be persisted at detection");
+    assert.doesNotMatch(outcome.error.message, /private-test-cookie/);
+    assert.equal(detached, true);
+    const nextScraper = new VipCarsScraper(config);
+    nextScraper.runSingleLocation = async () => { throw new Error("must not issue another search"); };
+    const counts = new Map();
+    const blocked = await nextScraper.runLocationWithRetries({}, "Warsaw", {
+      cooldown: shared, deadlineAt: Date.now() + 1000, attemptCounts: counts
+    });
+    assert.equal(blocked.error.code, "SERVER_COOLDOWN");
+    assert.equal(blocked.attempts, 0);
+    assert.equal(counts.size, 0);
+  }]);
+  cases.push(["a short cooldown expires before a new search starts", async () => {
+    const scraper = new VipCarsScraper(config);
+    const cooldown = { until: Date.now() + 35 };
+    let startedAt;
+    scraper.runSingleLocation = async () => {
+      startedAt = Date.now();
+      return { ok: true, results: [] };
+    };
+    const outcome = await scraper.runLocationWithRetries({}, "Warsaw", {
+      cooldown, deadlineAt: Date.now() + 1000
+    });
+    assert.equal(outcome.ok, true);
+    assert.ok(startedAt >= cooldown.until);
+  }]);
+  cases.push(["a cooldown wait cannot start a search after the job deadline", async () => {
+    const scraper = new VipCarsScraper(config);
+    const realNow = Date.now;
+    const realTimeout = global.setTimeout;
+    let now = 1000;
+    let calls = 0;
+    const counts = new Map();
+    scraper.runSingleLocation = async () => { calls += 1; return { ok: true, results: [] }; };
+    try {
+      Date.now = () => now;
+      global.setTimeout = (callback, ms) => {
+        now += ms + 100;
+        queueMicrotask(callback);
+      };
+      const outcome = await scraper.runLocationWithRetries({}, "Warsaw", {
+        cooldown: { until: 1010 }, deadlineAt: 1050, attemptCounts: counts
+      });
+      assert.equal(calls, 0);
+      assert.equal(counts.size, 0);
+      assert.equal(outcome.error.code, "JOB_DEADLINE");
+    } finally {
+      Date.now = realNow;
+      global.setTimeout = realTimeout;
+    }
+  }]);
+  cases.push(["a direct attempt does not open a browser context during a known cooldown", async () => {
+    let contexts = 0;
+    const scraper = new VipCarsScraper(config);
+    const outcome = await scraper.runSingleLocation({ newContext: async () => {
+      contexts += 1;
+      throw new Error("must not open a blocked search");
+    } }, "Warsaw", { cooldown: { until: Date.now() + 60000 } });
+    assert.equal(contexts, 0);
+    assert.equal(outcome.error.code, "SERVER_COOLDOWN");
+  }]);
+  cases.push(["network mode also records a CORS-hidden server cooldown", async () => {
+    const page = new EventEmitter();
+    const cdp = new EventEmitter();
+    cdp.send = async () => {};
+    cdp.detach = async () => cdp.removeAllListeners();
+    page.context = () => ({ newCDPSession: async () => cdp });
+    page.setDefaultTimeout = () => {};
+    page.setDefaultNavigationTimeout = () => {};
+    page.goto = () => new Promise(() => {
+      const url = "https://be.supplycars.com/be1/node.php?load_type=get_result_desktop&offset=0&car_page=0";
+      cdp.emit("Network.requestWillBeSent", { requestId: "initial", request: { url, method: "GET" } });
+      cdp.emit("Network.responseReceivedExtraInfo", { requestId: "initial", statusCode: 400,
+        headers: { "Retry-After": "3600" } });
+    });
+    const context = { addCookies: async () => {}, route: async () => {},
+      newPage: async () => page, close: async () => {} };
+    const shared = { until: 0 };
+    const scraper = new VipCarsScraper({ ...config, baseUrl: "https://www.vipcars.com",
+      networkResults: true, attemptBudgetMs: 150 });
+    scraper.captureFailureArtifacts = async () => {};
+    const start = Date.now();
+    const outcome = await scraper.runSingleLocation({ newContext: async () => context }, "Warsaw", { cooldown: shared });
+    assert.equal(outcome.error.code, "SERVER_COOLDOWN");
+    assert.ok(shared.until >= start + 3600000);
+  }]);
+  cases.push(["failed result requests end a stuck search without consuming its full deadline", async () => {
+    for (const [loadType, status, retryable] of [
+      ["get_result_desktop_filter", null, true], ["get_result_desktop", 503, true],
+      ["get_result_desktop_filter", 429, true], ["get_result_desktop_filter", 403, false]
+    ]) {
+      const page = new EventEmitter();
+      page.setDefaultTimeout = () => {};
+      page.setDefaultNavigationTimeout = () => {};
+      const request = { url: () => `https://be.supplycars.com/be1/node.php?${encodeURIComponent(JSON.stringify(`load_type=${loadType}&offset=300&key=private-test-key`))}`,
+        resourceType: () => "xhr", failure: () => ({ errorText: "net::ERR_FAILED" }) };
+      page.evaluate = async () => contractSnapshot();
+      page.goto = async () => ({ status: () => 200 });
+      const context = { addCookies: async () => {}, route: async () => {},
+        newPage: async () => page, close: async () => {} };
+      const scraper = new VipCarsScraper({ ...config, baseUrl: "https://www.vipcars.com",
+        transmission: "any", attemptBudgetMs: 250 });
+      scraper.waitForSearchOutcome = async () => "results";
+      scraper.loadSearchResultCards = () => new Promise(() => {
+        setTimeout(() => status === null ? page.emit("requestfailed", request)
+          : page.emit("response", { request: () => request, status: () => status }), 10);
+      });
+      scraper.captureFailureArtifacts = async () => {};
+      const start = Date.now();
+      const result = await scraper.runSingleLocation({ newContext: async () => context }, "Warsaw");
+      assert.equal(result.ok, false);
+      assert.equal(result.error.code, "RESULT_TRANSPORT_INVALID");
+      assert.equal(result.error.retryable, retryable);
+      assert.ok(Date.now() - start < 200, "request failure should not wait for attempt timeout");
+      assert.doesNotMatch(result.error.message, /private-test-key/);
+      assert.equal(page.listenerCount("requestfailed"), 0);
+      assert.equal(page.listenerCount("response"), 0);
+    }
+  }]);
+  cases.push(["unrelated failures and intentional cancellation do not interrupt a valid search", async () => {
+    const page = new EventEmitter();
+    page.setDefaultTimeout = () => {};
+    page.setDefaultNavigationTimeout = () => {};
+    page.evaluate = async () => contractSnapshot();
+    page.goto = async () => {
+      for (const [url, type, errorText] of [
+        ["https://be.supplycars.com/be1/node.php?load_type=get_result_desktop_filter", "xhr", "net::ERR_ABORTED"],
+        ["https://be.supplycars.com/be1/node.php?load_type=other", "xhr", "net::ERR_FAILED"],
+        ["https://be.supplycars.com/be1/node.php?load_type=get_result_desktop_filter", "image", "net::ERR_FAILED"],
+        ["https://example.test/be1/node.php?load_type=get_result_desktop_filter", "xhr", "net::ERR_FAILED"]
+      ]) page.emit("requestfailed", { url: () => url, resourceType: () => type, failure: () => ({ errorText }) });
+      return { status: () => 200 };
+    };
+    const context = { addCookies: async () => {}, route: async () => {},
+      newPage: async () => page, close: async () => {} };
+    const scraper = new VipCarsScraper({ ...config, baseUrl: "https://www.vipcars.com" });
+    scraper.waitForSearchOutcome = async () => "no-results";
+    const result = await scraper.runSingleLocation({ newContext: async () => context }, "Warsaw");
+    assert.equal(result.ok, true);
+  }]);
   cases.push(["a wrong effective search date fails before extracting or accepting empty offers", async () => {
     const temp = fs.mkdtempSync(path.join(root, "output", "runtime-contract-"));
     const page = new EventEmitter();

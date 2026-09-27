@@ -45,7 +45,7 @@ async function main() {
 
   const defaultAttemptBudget = loadConfig(["--config", path.join(root, "vipcars.config.example.json")]);
   assert.equal(defaultAttemptBudget.timeoutMs, 45000);
-  assert.equal(defaultAttemptBudget.attemptBudgetMs, 90000);
+  assert.equal(defaultAttemptBudget.attemptBudgetMs, 180000);
   assert.equal(loadConfig(["--config", path.join(root, "vipcars.config.example.json"),
     "--attempt-budget-ms", "12345"]).attemptBudgetMs, 12345);
   for (const invalidBudget of ["0", "-1", "NaN", "Infinity"]) {
@@ -60,8 +60,8 @@ async function main() {
   } finally {
     process.stdout.write = originalStdoutWrite;
   }
-  assert.match(helpText, /--attempt-budget-ms 90000/);
-  console.log("PASS attempt budget defaults to 90 seconds and rejects invalid values");
+  assert.match(helpText, /--attempt-budget-ms 180000/);
+  console.log("PASS attempt budget defaults to 180 seconds and rejects invalid values");
 
   assert.match(workflow, /vehicle_category:/);
   assert.match(workflow, /command\+=\(--vehicle-category "\$VEHICLE_CATEGORY"\)/);

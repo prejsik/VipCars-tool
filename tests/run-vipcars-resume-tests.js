@@ -5,6 +5,7 @@ const path = require("node:path");
 const { chromium } = require("playwright");
 const { loadConfig, printHelp } = require("../src/vipcars/config");
 const { parseCsv } = require("../src/vipcars/reportHtml");
+const { createRunState, loadRunState, saveRunState } = require("../src/vipcars/resumeState");
 const { VipCarsScraper } = require("../src/vipcars/scraper");
 
 async function main() {
@@ -36,6 +37,7 @@ async function main() {
   const originalSingleLocation = VipCarsScraper.prototype.runSingleLocation;
   const originalExitCode = process.exitCode;
   const originalDateNow = Date.now;
+  const testNow = Date.parse("2026-09-27T12:00:00.000Z");
   let launches = 0;
   let closes = 0;
   const calls = [];
@@ -45,7 +47,106 @@ async function main() {
   };
 
   try {
+    // Keep deadline tests on one Warsaw calendar day regardless of wall-clock time.
+    Date.now = () => testNow;
     const { main: runCli } = require("../src/vipcars/cli");
+
+    const checkpointNow = Date.parse("2026-09-27T12:00:00.000Z");
+    const cooldownStatePath = path.join(temp, "cooldown.resume.json");
+    const cooldownState = createRunState(resumeConfig, checkpointNow);
+    const futureCooldownUntil = checkpointNow + 30 * 60 * 1000;
+    cooldownState.cooldown.until = futureCooldownUntil;
+    saveRunState(cooldownStatePath, cooldownState);
+    assert.equal(readJson(cooldownStatePath).cooldown_until, futureCooldownUntil);
+    assert.equal(loadRunState(cooldownStatePath, resumeConfig, checkpointNow).cooldown.until,
+      futureCooldownUntil);
+    console.log("PASS a future cooldown round-trips through the resume checkpoint");
+
+    const expiredCooldownUntil = checkpointNow - 60 * 1000;
+    cooldownState.cooldown.until = expiredCooldownUntil;
+    saveRunState(cooldownStatePath, cooldownState);
+    assert.equal(loadRunState(cooldownStatePath, resumeConfig, checkpointNow).cooldown.until,
+      expiredCooldownUntil);
+    console.log("PASS an expired cooldown timestamp is preserved for auditability");
+
+    const legacyCheckpoint = readJson(cooldownStatePath);
+    delete legacyCheckpoint.cooldown_until;
+    writeJson(cooldownStatePath, legacyCheckpoint);
+    assert.equal(loadRunState(cooldownStatePath, resumeConfig, checkpointNow).cooldown.until, 0);
+    console.log("PASS checkpoints without cooldown_until default to zero");
+
+    const validCooldownCheckpoint = clone(legacyCheckpoint);
+    validCooldownCheckpoint.cooldown_until = 0;
+    const invalidCooldowns = [
+      ["negative", -1],
+      ["string", "123"],
+      ["above the maximum timestamp", 8640000000000001]
+    ];
+    for (const [description, value] of invalidCooldowns) {
+      const invalidCheckpoint = clone(validCooldownCheckpoint);
+      invalidCheckpoint.cooldown_until = value;
+      writeJson(cooldownStatePath, invalidCheckpoint);
+      assert.throws(
+        () => loadRunState(cooldownStatePath, resumeConfig, checkpointNow),
+        /cooldown_until is invalid/,
+        `${description} cooldown_until must be rejected`
+      );
+    }
+    const nonFiniteCheckpoint = JSON.stringify({
+      ...validCooldownCheckpoint,
+      cooldown_until: "__NON_FINITE__"
+    }, null, 2).replace('"__NON_FINITE__"', "1e309");
+    fs.writeFileSync(cooldownStatePath, `${nonFiniteCheckpoint}\n`);
+    assert.throws(
+      () => loadRunState(cooldownStatePath, resumeConfig, checkpointNow),
+      /cooldown_until is invalid/,
+      "non-finite cooldown_until must be rejected"
+    );
+    console.log("PASS invalid cooldown timestamps are rejected");
+
+    const callbackDir = path.join(temp, "cooldown-callback");
+    const callbackConfigPath = path.join(callbackDir, "config.json");
+    const callbackResultsPath = path.join(callbackDir, "results.csv");
+    const callbackCoveragePath = path.join(callbackDir, "coverage.csv");
+    const callbackResumePath = `${callbackCoveragePath}.resume.json`;
+    fs.mkdirSync(callbackDir, { recursive: true });
+    writeConfig(callbackConfigPath, {
+      resultsPath: callbackResultsPath,
+      coveragePath: callbackCoveragePath,
+      artifactsDir: callbackDir,
+      locations: ["Warsaw"]
+    });
+    const callbackConfig = loadConfig(["--config", callbackConfigPath]);
+    const futureCallbackCooldownUntil = Date.now() + 60 * 60 * 1000;
+    const callbackLaunchesBefore = launches;
+    const callbackClosesBefore = closes;
+    const callbackSingleLocationBefore = VipCarsScraper.prototype.runSingleLocation;
+    let persistedDuringAttempt;
+    try {
+      VipCarsScraper.prototype.runSingleLocation = async function (browser, location, options) {
+        assert.equal(typeof options.onCooldown, "function",
+          "CLI must provide an immediate cooldown checkpoint callback");
+        options.cooldown.until = futureCallbackCooldownUntil;
+        options.onCooldown();
+        persistedDuringAttempt = readJson(callbackResumePath).cooldown_until;
+        assert.equal(persistedDuringAttempt, futureCallbackCooldownUntil);
+        throw new Error("Simulated interruption after cooldown checkpoint");
+      };
+      const callbackInterrupted = await invokeCli(runCli, ["--config", callbackConfigPath]);
+      assert.equal(callbackInterrupted.exitCode, 1);
+      assert.match(callbackInterrupted.errors, /Simulated interruption after cooldown checkpoint/);
+      assert.equal(persistedDuringAttempt, futureCallbackCooldownUntil);
+      assert.equal(loadRunState(callbackResumePath, callbackConfig).cooldown.until,
+        futureCallbackCooldownUntil);
+      assert.equal(launches, callbackLaunchesBefore + 1);
+      assert.equal(closes, callbackClosesBefore + 1);
+    } finally {
+      VipCarsScraper.prototype.runSingleLocation = callbackSingleLocationBefore;
+      launches = callbackLaunchesBefore;
+      closes = callbackClosesBefore;
+    }
+    console.log("PASS an in-flight cooldown is checkpointed before a later interruption");
+
     VipCarsScraper.prototype.runSingleLocation = async function (browser, location, options) {
       calls.push({ location, attempt: options.attempt });
       if (location === "Krakow") {
@@ -256,7 +357,7 @@ async function main() {
     writeJson(resumePath, crossDateState);
     Date.now = () => Date.parse("2026-09-26T23:00:00.000Z");
     const crossDate = await invokeCli(runCli, ["--config", configPath, "--resume"]);
-    Date.now = originalDateNow;
+    Date.now = () => testNow;
     assert.equal(crossDate.exitCode, 1);
     assert.match(crossDate.errors, /Warsaw calendar date/i);
     console.log("PASS checkpoints cannot cross a Warsaw calendar date");
