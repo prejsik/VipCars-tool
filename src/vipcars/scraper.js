@@ -3,6 +3,9 @@ const { chromium } = require("playwright");
 const { normalizeVehicleCategory } = require("./config");
 const { createAttemptDiagnostics, sanitizeMessage } = require("./diagnostics");
 const readiness = require("./resultReadiness");
+const { validatePageSearch } = require("./searchContract");
+const transport = require("./resultTransport");
+const { readOfferCards, parseOfferPage } = require("./offerCards");
 const {
   ensureDir,
   formatMoney,
@@ -102,6 +105,8 @@ class VipCarsScraper {
     });
     let context;
     let page;
+    let initialResults;
+    const allowedResultUrls = new Set();
     let expired = false;
     let rejectDeadline;
     const deadline = new Promise((resolve, reject) => { rejectDeadline = reject; });
@@ -128,6 +133,13 @@ class VipCarsScraper {
       await bounded(this.configureCurrency(context));
       await bounded(context.route("**/*", async (route) => {
         const type = route.request().resourceType();
+        const resultRequest = transport.parseResultRequest(route.request().url());
+        if (this.config.networkResults && resultRequest && resultRequest.params.get("offset") !== "0") {
+          if (!transport.allowPaginationRequest(route.request(), allowedResultUrls)) {
+            await route.abort().catch(() => {});
+            return;
+          }
+        }
         if (type === "image" || type === "font" || type === "media") {
           await route.abort().catch(() => {});
           return;
@@ -137,6 +149,7 @@ class VipCarsScraper {
 
       page = await bounded(context.newPage());
       diagnostics.attach(page);
+      if (this.config.networkResults) initialResults = transport.captureInitialResults(page);
       page.setDefaultTimeout(remaining());
       page.setDefaultNavigationTimeout(remaining());
 
@@ -157,15 +170,25 @@ class VipCarsScraper {
       const searchOutcome = await diagnostics.measure("search", () => bounded(this.waitForSearchOutcome(page, {
         ...waitOptions, timeoutMs: this.config.timeoutMs || 45000
       })));
+      await diagnostics.measure("search_contract", () => bounded(validatePageSearch(page, this.buildSearchUrl(location))));
       if (searchOutcome === "no-results") {
         console.log("    VipCars returned no available cars for this date/time.");
         return { ok: true, cheapest: null, results: [] };
       }
-      if (this.config.transmission !== "any") {
-        await diagnostics.measure("automatic_filter", () => bounded(this.applyAutomaticTransmissionFilter(page, waitOptions)));
+      const captured = await bounded(initialResults?.read());
+      if (this.config.networkResults && !captured) throw transport.transportError("Initial result response was not captured.", true);
+      let raw;
+      if (captured) {
+        raw = await diagnostics.measure("network_offers", () => bounded(this.loadNetworkOffers(
+          context, page, captured, location, { ...waitOptions, allowedResultUrls })));
+      } else {
+        if (this.config.transmission !== "any") {
+          await diagnostics.measure("automatic_filter", () => bounded(this.applyAutomaticTransmissionFilter(page, waitOptions)));
+        }
+        await diagnostics.measure("load_cards", () => bounded(this.loadSearchResultCards(page, waitOptions)));
       }
-      await diagnostics.measure("load_cards", () => bounded(this.loadSearchResultCards(page, waitOptions)));
-      const offers = await diagnostics.measure("extract", () => bounded(this.extractSearchOffers(page, location)));
+      await diagnostics.measure("final_search_contract", () => bounded(validatePageSearch(page, this.buildSearchUrl(location))));
+      const offers = await diagnostics.measure("extract", () => bounded(this.extractSearchOffers(page, location, raw)));
       if (!offers.length) {
         return { ok: true, cheapest: null, results: [] };
       }
@@ -185,6 +208,7 @@ class VipCarsScraper {
       return { ok: false, error };
     } finally {
       clearTimeout(watchdog);
+      initialResults?.detach();
       diagnostics.detach();
       if (context) await settleWithin(context.close().catch(() => {}), 2000);
       const timing = diagnostics.snapshot();
@@ -252,39 +276,48 @@ class VipCarsScraper {
     return applied;
   }
 
-  async extractSearchOffers(page, fallbackLocation) {
-    const raw = await page.evaluate((defaultLocation) => {
-      const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
-      const cards = Array.from(document.querySelectorAll(".scv-car-box"));
-      return cards.map((card) => {
-        const supplierImage = card.querySelector(".scv-supp-info img[alt], img[id^='supplier_']");
-        const provider = normalize(
-          supplierImage?.getAttribute("alt") ||
-          supplierImage?.getAttribute("title") ||
-          card.querySelector(".scv-supp-info h5")?.textContent ||
-          ""
-        );
-        const rating = normalize(card.querySelector("[id^='supplier_rating_']")?.textContent || "");
-        const priceText = normalize(
-          card.querySelector(".scv-new-amount")?.textContent ||
-          card.querySelector(".scv-car-price")?.textContent ||
-          ""
-        );
-        const payNowText = normalize(card.querySelector(".scv-pay-now")?.textContent || "");
-        const carName = normalize(
-          card.querySelector(".scv-car-name")?.textContent ||
-          card.querySelector(".scv-car-img img[alt]")?.getAttribute("alt") ||
-          ""
-        );
-        const transmission = normalize(Array.from(card.querySelectorAll(".scv-car-specs li"))
-          .map((item) => item.textContent || "")
-          .find((text) => /transmission/i.test(text)) || "");
-        const automatic = Boolean(card.querySelector(".scv-car-specs .scv-icon.autom")) ||
-          /\bautomatic\b/i.test(`${transmission} ${carName}`);
-        const vehicleCategory = normalize(card.querySelector(".scv-car-cat")?.textContent || "");
-        return { provider, rating, priceText, payNowText, location: defaultLocation, carName, transmission, automatic, vehicleCategory };
+  async loadNetworkOffers(context, page, captured, location, options) {
+    transport.validateResultRequest(captured.source, this.buildSearchUrl(location));
+    const parserPage = await context.newPage();
+    try {
+      const initial = await parseOfferPage(parserPage, captured.html, location);
+      const visible = await page.evaluate(readOfferCards, { location });
+      transport.compareVisibleCards(initial.cards, visible);
+      const visibleCounts = await page.evaluate(() => ["car_count_data", "car_count"]
+        .map((id) => {
+          const element = document.getElementById(id);
+          return String(element?.value ?? element?.textContent ?? "").trim();
+        }).filter(Boolean));
+      if (!visibleCounts.length || visibleCounts.some((value) => !/^\d+$/.test(value) || Number(value) !== initial.totalCount)) {
+        throw transport.transportError("Result response and visible DOM total counts differ.");
+      }
+      const cards = await transport.collectResultPages({ initial, source: captured.source,
+        deadlineAt: options.deadlineAt, onState: options.onState,
+        fetchPage: async (url, timeout) => {
+          try {
+            options.allowedResultUrls.add(url);
+            const response = await transport.fetchResultPage(page, url, timeout, captured.source.headers);
+            if (response.status !== 200) {
+              throw transport.transportError(`Result page HTTP ${response.status}.`, response.status >= 500);
+            }
+            return await parseOfferPage(parserPage, response.html, location);
+          } catch (error) {
+            if (error.code === "RESULT_TRANSPORT_INVALID") throw error;
+            throw transport.transportError("Result page fetch or parsing failed.", true);
+          } finally {
+            options.allowedResultUrls.delete(url);
+          }
+        }
       });
-    }, fallbackLocation);
+      console.log(`    Network results: ${cards.length}/${initial.totalCount}; first-page DOM values verified.`);
+      return cards;
+    } finally {
+      await parserPage.close();
+    }
+  }
+
+  async extractSearchOffers(page, fallbackLocation, networkCards) {
+    const raw = networkCards || await page.evaluate(readOfferCards, { location: fallbackLocation });
 
     const offers = [];
     const desiredCurrency = this.getCurrency();
@@ -297,7 +330,10 @@ class VipCarsScraper {
       }
       const currency = normalizeCurrency(money.currency || desiredCurrency);
       if (currency !== desiredCurrency) {
-        continue;
+        const error = new Error(`Offer currency is ${currency}, expected ${desiredCurrency}.`);
+        error.code = "SEARCH_CURRENCY_MISMATCH";
+        error.retryable = false;
+        throw error;
       }
       const totalPrice = Number(money.value);
       const payNow = parseMoney(candidate.payNowText);
@@ -413,9 +449,12 @@ function selectBestOffersByProvider(offers, maxProviders) {
       byProvider.set(key, offer);
     }
   }
-  return [...byProvider.values()]
-    .sort((left, right) => Number(left.total_price) - Number(right.total_price))
-    .slice(0, Number.isFinite(maxProviders) && maxProviders > 0 ? maxProviders : undefined);
+  const sorted = [...byProvider.values()]
+    .sort((left, right) => Number(left.total_price) - Number(right.total_price));
+  const selected = sorted.slice(0, Number.isFinite(maxProviders) && maxProviders > 0 ? maxProviders : undefined);
+  const mm = sorted.find((offer) => normalizeWhitespace(offer.provider).toLowerCase().includes("mm cars rental"));
+  if (mm && !selected.includes(mm)) selected.push(mm);
+  return selected;
 }
 
 function isAutomaticTransmissionCandidate(candidate) {

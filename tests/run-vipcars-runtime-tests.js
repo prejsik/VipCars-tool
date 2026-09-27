@@ -12,7 +12,60 @@ async function main() {
     locations: ["Warsaw"], pickupDate: "2026-10-02", dropoffDate: "2026-10-04",
     currentDurationDays: 2, artifactsDir: path.join(root, "output"), timeoutMs: 1000
   };
+  Object.assign(config, { pickupTime: "10:00", dropoffTime: "10:00", currency: "EUR" });
+  const contractSnapshot = () => ({ actual: {
+    pickup_country: "119", pickup_city: "1744", pickup_location: "10921",
+    dropoff_country: "119", dropoff_city: "1744", dropoff_location: "10921",
+    pickup_date: config.pickupDate, dropoff_date: config.dropoffDate,
+    pickup_time: "10:00", dropoff_time: "10:00", currency: "EUR"
+  }, missing: [], currencyValues: ["EUR"] });
   const cases = [];
+  cases.push(["a wrong effective search date fails before extracting or accepting empty offers", async () => {
+    const temp = fs.mkdtempSync(path.join(root, "output", "runtime-contract-"));
+    const page = new EventEmitter();
+    page.setDefaultTimeout = () => {};
+    page.setDefaultNavigationTimeout = () => {};
+    page.goto = async () => ({ status: () => 200 });
+    page.evaluate = async () => {
+      const state = contractSnapshot();
+      state.actual.pickup_date = "2026-10-03";
+      return state;
+    };
+    page.screenshot = async () => {};
+    page.content = async () => "";
+    const context = { addCookies: async () => {}, route: async () => {},
+      newPage: async () => page, close: async () => {} };
+    const scraper = new VipCarsScraper({ ...config, baseUrl: "https://www.vipcars.com", artifactsDir: temp });
+    scraper.waitForSearchOutcome = async () => "no-results";
+    const outcome = await scraper.runSingleLocation({ newContext: async () => context }, "Warsaw");
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.error.code, "SEARCH_CONTRACT_MISMATCH");
+    assert.equal(outcome.error.retryable, false);
+  }]);
+  cases.push(["provider cap keeps MM Cars even when cheaper competitors fill the limit", async () => {
+    const page = new EventEmitter();
+    page.setDefaultTimeout = () => {};
+    page.setDefaultNavigationTimeout = () => {};
+    page.goto = async () => ({ status: () => 200 });
+    page.evaluate = async () => contractSnapshot();
+    const context = { addCookies: async () => {}, route: async () => {},
+      newPage: async () => page, close: async () => {} };
+    const scraper = new VipCarsScraper({ ...config, baseUrl: "https://www.vipcars.com",
+      maxProvidersPerLocation: 2, transmission: "any" });
+    scraper.waitForSearchOutcome = async () => "results";
+    scraper.loadSearchResultCards = async () => ({ status: "complete" });
+    scraper.extractSearchOffers = async () => [
+      { provider: "Competitor A", total_price: 10 },
+      { provider: "Competitor B", total_price: 20 },
+      { provider: "MM Cars Rental", total_price: 30 },
+      { provider: "MM Cars Rental", total_price: 40 }
+    ];
+    const outcome = await scraper.runSingleLocation({ newContext: async () => context }, "Warsaw");
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(outcome.results.map((offer) => offer.provider),
+      ["Competitor A", "Competitor B", "MM Cars Rental"]);
+    assert.equal(outcome.results[2].total_price, 30);
+  }]);
   cases.push(["pagination gets the larger attempt budget without extending empty-page waits", async () => {
     const temp = fs.mkdtempSync(path.join(root, "output", "runtime-budgets-"));
     for (const hasResults of [false, true]) {
@@ -21,7 +74,7 @@ async function main() {
       page.setDefaultTimeout = () => {};
       page.setDefaultNavigationTimeout = () => {};
       page.goto = async () => { navigatedAt = Date.now(); return { status: () => 200 }; };
-      page.evaluate = async () => ({
+      page.evaluate = async (fn, args) => args?.fieldDefinitions ? contractSnapshot() : ({
         cardCount: hasResults ? (Date.now() - navigatedAt >= 50 ? 2 : 1) : 0,
         totalCount: hasResults ? 2 : null, busy: false, noResults: false
       });
@@ -49,6 +102,7 @@ async function main() {
   }]);
   cases.push(["diagnostics redact Cookie and Set-Cookie header values", async () => {
     assert.doesNotMatch(sanitizeMessage("Cookie: sessionid=private-cookie; extra=private-extra\nSet-Cookie: auth=private-auth"), /private-/);
+    assert.doesNotMatch(sanitizeMessage('Failed https://be.supplycars.com/be1/node.php?"&key=private-key&deviceID=private-device"'), /private-/);
   }]);
   cases.push(["context creation is bounded and a late context is closed", async () => {
     const temp = fs.mkdtempSync(path.join(root, "output", "runtime-context-"));

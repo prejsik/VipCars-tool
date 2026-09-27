@@ -9,6 +9,7 @@ import sys
 from copy import copy
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ BASE_HEADERS = [
 ]
 CHANGE_FILL = PatternFill(fill_type="solid", fgColor="FFF2CC")
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="D9EAF7")
+CONFIRMED_BASELINE_STATUSES = {"confirmed_imported", "verified_live"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,29 +44,66 @@ def load_json(path: Path) -> dict[str, Any]:
         return json.load(handle)
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def verify_baseline(workbook_path: Path, config_path: Path, config: dict[str, Any]) -> str:
+def resolve_manifest_path(config_path: Path, config: dict[str, Any]) -> Path:
     raw_manifest = config.get("baseline_manifest_file")
     if not raw_manifest:
         raise ValueError("Config is missing baseline_manifest_file.")
     manifest_path = Path(raw_manifest)
     if not manifest_path.is_absolute():
         manifest_path = config_path.parent / manifest_path
+    return manifest_path.resolve()
+
+
+def verify_baseline(workbook_source: bytes | Path, config_path: Path, config: dict[str, Any]) -> str:
+    manifest_path = resolve_manifest_path(config_path, config)
     manifest = load_json(manifest_path)
+    status = str(manifest.get("status") or "").strip().lower()
+    if status not in CONFIRMED_BASELINE_STATUSES:
+        raise ValueError(
+            "Baseline manifest status must be confirmed_imported or verified_live; "
+            f"got {status or 'missing'}. Confirm the baseline before generating outputs."
+        )
+    confirmed_at = str(manifest.get("confirmed_at") or "").strip()
+    try:
+        parsed_confirmation = datetime.fromisoformat(
+            confirmed_at[:-1] + "+00:00" if confirmed_at.endswith("Z") else confirmed_at
+        )
+    except ValueError as error:
+        raise ValueError(
+            "Confirmed baseline manifest requires confirmed_at as a valid ISO-8601 timestamp with timezone."
+        ) from error
+    if parsed_confirmation.tzinfo is None or parsed_confirmation.utcoffset() is None:
+        raise ValueError(
+            "Confirmed baseline manifest requires confirmed_at as a valid ISO-8601 timestamp with timezone."
+        )
+    if not str(manifest.get("confirmed_by") or "").strip():
+        raise ValueError("Confirmed baseline manifest requires non-empty confirmed_by.")
     expected = str(manifest.get("workbook_sha256", "")).lower()
-    actual = sha256_file(workbook_path)
+    source_bytes = workbook_source.read_bytes() if isinstance(workbook_source, Path) else workbook_source
+    actual = hashlib.sha256(source_bytes).hexdigest()
     if not expected or actual != expected:
         raise ValueError(
             f"Workbook does not match the baseline manifest: expected {expected or 'missing hash'}, got {actual}."
         )
     return actual
+
+
+def validate_path_collisions(
+        input_paths: dict[str, Path], output_paths: dict[str, Path | None]) -> None:
+    active_outputs = {name: path for name, path in output_paths.items() if path is not None}
+    for output_name, output_path in active_outputs.items():
+        for input_name, input_path in input_paths.items():
+            if output_path == input_path:
+                raise ValueError(
+                    f"Path collision: {output_name} output resolves to the {input_name} input: {output_path}."
+                )
+    output_items = list(active_outputs.items())
+    for index, (left_name, left_path) in enumerate(output_items):
+        for right_name, right_path in output_items[index + 1:]:
+            if left_path == right_path:
+                raise ValueError(
+                    f"Path collision: {left_name} and {right_name} outputs resolve to {left_path}."
+                )
 
 
 def parse_date(value: Any) -> date:
@@ -619,8 +658,8 @@ def add_report_sheets(workbook, recommendations, changes, blocked, source_hash, 
     style_report_sheet(validation_sheet)
 
 
-def prepare_workbook(source: Path, worksheet_name: str, rate_zones: list[dict[str, str]], bands):
-    workbook = load_workbook(source)
+def prepare_workbook(source_bytes: bytes, worksheet_name: str, rate_zones: list[dict[str, str]], bands):
+    workbook = load_workbook(BytesIO(source_bytes))
     if worksheet_name not in workbook.sheetnames:
         raise ValueError(f"Worksheet {worksheet_name!r} was not found.")
     for sheet in list(workbook.worksheets):
@@ -641,7 +680,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     summary_output = Path(args.summary_output).resolve() if args.summary_output else None
 
     config = load_json(config_path)
-    source_hash = verify_baseline(workbook_path, config_path, config)
+    manifest_path = resolve_manifest_path(config_path, config)
+    validate_path_collisions(
+        {
+            "workbook": workbook_path,
+            "recommendations": recommendations_path,
+            "config": config_path,
+            "baseline manifest": manifest_path,
+        },
+        {
+            "report": report_output,
+            "import": import_output,
+            "summary": summary_output,
+        },
+    )
+    source_bytes = workbook_path.read_bytes()
+    source_hash = verify_baseline(source_bytes, config_path, config)
     recommendations = load_json(recommendations_path)
     bands = config.get("duration_bands", [])
     if not bands:
@@ -650,7 +704,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     plans, blocked = build_band_plans(recommendations, bands, rate_zones, config)
     worksheet_name = str(config.get("worksheet", "RateGroup Export"))
 
-    workbook, worksheet, expanded_rows = prepare_workbook(workbook_path, worksheet_name, rate_zones, bands)
+    workbook, worksheet, expanded_rows = prepare_workbook(source_bytes, worksheet_name, rate_zones, bands)
     validate_plan_targets(worksheet, plans, config)
     changes = apply_plans(worksheet, plans, config)
     report_output.parent.mkdir(parents=True, exist_ok=True)

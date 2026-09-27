@@ -10,6 +10,7 @@ function safeUrl(value) {
 function sanitizeMessage(value) {
   return String(value || "")
     .replace(/\b((?:set-)?cookie\s*:\s*)[^\r\n]*/gi, "$1<redacted>")
+    .replace(/(https?:\/\/[^\s"'<>?]+)\?\\?["'][^\r\n]*/g, "$1?<redacted>")
     .replace(/https?:\/\/[^\s"'<>]+/g, safeUrl)
     .replace(/\b(authorization\s*:\s*)(?:bearer\s+)?\S+/gi, "$1<redacted>")
     .replace(/\b(token|api[_-]?key|password|secret)\s*[=:]\s*[^\s,;]+/gi, "$1=<redacted>")

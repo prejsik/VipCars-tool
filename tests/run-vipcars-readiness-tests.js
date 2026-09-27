@@ -248,6 +248,37 @@ async function main() {
     }
   ));
 
+  test("activating an offscreen filter does not scroll and start pagination", () => withPage(
+    browser,
+    `<input id="page_busy" value="0">
+      <span id="car_count_data">2</span>
+      <div id="results">${AUTOMATIC_CARD}${MANUAL_CARD}</div>
+      <div style="height: 2400px"></div>
+      <input id="filter_automatic" type="checkbox">
+      <script>
+        window.filterActivationScrolls = 0;
+        window.addEventListener("scroll", () => { window.filterActivationScrolls += 1; });
+        document.getElementById("filter_automatic").addEventListener("change", () => {
+          const busy = document.getElementById("page_busy");
+          busy.value = "1";
+          document.querySelector(".scv-car-box:last-child").remove();
+          document.getElementById("car_count_data").textContent = "1";
+          busy.value = "0";
+        });
+      </script>`,
+    async (page) => {
+      assert.equal(await page.evaluate(() => window.scrollY), 0);
+      assert.equal(await applyAutomaticTransmissionFilter(page, {
+        timeoutMs: 200,
+        pollIntervalMs: 10
+      }), true);
+      await page.waitForTimeout(20);
+      assert.equal(await page.evaluate(() => window.scrollY), 0);
+      assert.equal(await page.evaluate(() => window.filterActivationScrolls), 0);
+      assert.equal(await page.locator(".scv-car-box").count(), 1);
+    }
+  ));
+
   test("an explicit empty-results page is classified as no results", () => withPage(
     browser,
     NO_RESULTS,
@@ -334,7 +365,7 @@ async function main() {
     }
   ));
 
-  test("filter fallback click is bounded by the remaining deadline", () => withPage(
+  test("native filter click is bounded by the remaining deadline", () => withPage(
     browser,
     '<input id="filter_automatic" type="checkbox">',
     async (page) => {
@@ -347,20 +378,15 @@ async function main() {
             return {
               count: () => filter.count(),
               isChecked: () => filter.isChecked(),
-              check: async () => {
-                await page.waitForTimeout(35);
-                throw new Error("primary click failed");
+              evaluate: async (callback, argument, { timeout }) => {
+                await page.waitForTimeout(timeout);
+                const error = new Error(`locator.evaluate: Timeout ${timeout}ms exceeded.`);
+                error.name = "TimeoutError";
+                throw error;
               }
             };
           }
-          return {
-            click: async ({ timeout }) => {
-              await page.waitForTimeout(timeout);
-              const error = new Error(`locator.click: Timeout ${timeout}ms exceeded.`);
-              error.name = "TimeoutError";
-              throw error;
-            }
-          };
+          throw new Error(`Unexpected locator: ${selector}`);
         }
       };
       const startedAt = Date.now();
@@ -371,7 +397,7 @@ async function main() {
         }),
         "FILTER_TIMEOUT"
       );
-      assert.ok(Date.now() - startedAt < 250, "fallback click exceeded the absolute deadline");
+      assert.ok(Date.now() - startedAt < 250, "native click exceeded the absolute deadline");
     }
   ));
 

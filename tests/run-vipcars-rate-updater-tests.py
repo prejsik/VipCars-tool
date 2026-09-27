@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from argparse import Namespace
 from copy import deepcopy
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
@@ -23,7 +24,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools" / "update_vipcars_rates.py"
 CONFIG_PATH = ROOT / "vipcars-rate-update.config.json"
 BASELINE_PATH = ROOT / "input" / "vipcars-rate-group-export.xlsx"
-MANIFEST_PATH = ROOT / "input" / "vipcars-baseline-manifest.json"
 
 HEADERS = [
     "Group", "Miles / pd", "Mile rate", "Pickup start", "Pickup end",
@@ -230,6 +230,15 @@ def sheet_with_rows(rows: list[list]):
     return sheet
 
 
+def confirmed_manifest(workbook_path: Path, status: str = "confirmed_imported") -> dict:
+    return {
+        "status": status,
+        "confirmed_at": "2026-09-27T10:00:00+02:00",
+        "confirmed_by": "synthetic-test-fixture",
+        "workbook_sha256": hashlib.sha256(workbook_path.read_bytes()).hexdigest(),
+    }
+
+
 def check_production_contract_and_baseline() -> None:
     config = production_config()
     assert config["apply_groups"] == PRODUCTION_GROUPS
@@ -256,9 +265,6 @@ def check_production_contract_and_baseline() -> None:
         {"column": "L", "label": "9+", "min_days": 9, "max_days": 14, "update_enabled": False},
     ]
 
-    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    baseline_hash = hashlib.sha256(BASELINE_PATH.read_bytes()).hexdigest()
-    assert baseline_hash == manifest["workbook_sha256"]
     workbook = load_workbook(BASELINE_PATH, read_only=True, data_only=False)
     sheet = workbook[config["worksheet"]]
     assert [cell.value for cell in next(sheet.iter_rows(max_row=1))] == HEADERS
@@ -321,16 +327,204 @@ def check_header_and_baseline_rejections() -> None:
     expect_value_error(lambda: updater.validate_sheet(wrong, bands), "unexpected import headers")
 
     with tempfile.TemporaryDirectory(prefix="vipcars-baseline-test-") as raw_temp:
-        manifest_path = Path(raw_temp) / "wrong-baseline.json"
-        manifest_path.write_text(json.dumps({"workbook_sha256": "0" * 64}), encoding="utf-8")
+        temp = Path(raw_temp)
+        workbook_path = temp / "synthetic-baseline.xlsx"
+        workbook_path.write_bytes(b"synthetic baseline fixture")
+        manifest_path = temp / "baseline-manifest.json"
+        config_path = temp / "config.json"
+        config = {"baseline_manifest_file": str(manifest_path)}
+
+        def write_manifest(payload: dict) -> None:
+            manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        for status in ("confirmed_imported", "verified_live"):
+            payload = confirmed_manifest(workbook_path, status)
+            write_manifest(payload)
+            assert updater.verify_baseline(workbook_path, config_path, config) == payload["workbook_sha256"]
+
+        pending = confirmed_manifest(workbook_path)
+        pending["status"] = "pending"
+        write_manifest(pending)
         expect_value_error(
-            lambda: updater.verify_baseline(
-                BASELINE_PATH,
-                Path(raw_temp) / "config.json",
-                {"baseline_manifest_file": str(manifest_path)},
-            ),
-            "baseline manifest",
+            lambda: updater.verify_baseline(workbook_path, config_path, config),
+            "status",
         )
+
+        missing_status = confirmed_manifest(workbook_path)
+        del missing_status["status"]
+        write_manifest(missing_status)
+        expect_value_error(
+            lambda: updater.verify_baseline(workbook_path, config_path, config),
+            "status",
+        )
+
+        missing_date = confirmed_manifest(workbook_path)
+        del missing_date["confirmed_at"]
+        write_manifest(missing_date)
+        expect_value_error(
+            lambda: updater.verify_baseline(workbook_path, config_path, config),
+            "confirmed_at",
+        )
+
+        invalid_date = confirmed_manifest(workbook_path)
+        invalid_date["confirmed_at"] = "2026-09-27"
+        write_manifest(invalid_date)
+        expect_value_error(
+            lambda: updater.verify_baseline(workbook_path, config_path, config),
+            "confirmed_at",
+        )
+
+        missing_by = confirmed_manifest(workbook_path)
+        missing_by["confirmed_by"] = "  "
+        write_manifest(missing_by)
+        expect_value_error(
+            lambda: updater.verify_baseline(workbook_path, config_path, config),
+            "confirmed_by",
+        )
+
+        wrong_hash = confirmed_manifest(workbook_path)
+        wrong_hash["workbook_sha256"] = "0" * 64
+        write_manifest(wrong_hash)
+        expect_value_error(
+            lambda: updater.verify_baseline(workbook_path, config_path, config),
+            "does not match",
+        )
+
+        write_manifest(missing_status)
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        report_output = temp / "report.xlsx"
+        import_output = temp / "import.xlsx"
+        summary_output = temp / "summary.json"
+        expect_value_error(
+            lambda: updater.run(Namespace(
+                workbook=str(workbook_path),
+                recommendations=str(temp / "must-not-be-read.json"),
+                config=str(config_path),
+                report_output=str(report_output),
+                import_output=str(import_output),
+                summary_output=str(summary_output),
+            )),
+            "status",
+        )
+        assert not report_output.exists()
+        assert not import_output.exists()
+        assert not summary_output.exists()
+
+
+def check_immutable_workbook_snapshot() -> None:
+    updater = load_updater()
+    with tempfile.TemporaryDirectory(prefix="vipcars-immutable-source-") as raw_temp:
+        temp = Path(raw_temp)
+        workbook_path = temp / "baseline.xlsx"
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "RateGroup Export"
+        worksheet.append(HEADERS)
+        workbook.save(workbook_path)
+        original_bytes = workbook_path.read_bytes()
+
+        manifest_path = temp / "baseline-manifest.json"
+        manifest_path.write_text(json.dumps(confirmed_manifest(workbook_path)), encoding="utf-8")
+        config = single_zone_config()
+        config["baseline_manifest_file"] = str(manifest_path)
+        config_path = temp / "config.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        recommendations_path = temp / "recommendations.json"
+        recommendations_path.write_text(json.dumps({
+            "pricing_model": "absolute_net_v1",
+            "exchange_rate": {
+                "pln_per_eur": 4.3,
+                "source": "fallback",
+                "effective_date": None,
+            },
+            "decisions": [],
+        }), encoding="utf-8")
+        report_output = temp / "report.xlsx"
+        import_output = temp / "import.xlsx"
+        summary_output = temp / "summary.json"
+        original_verify = updater.verify_baseline
+
+        def verify_then_replace(source, source_config_path, source_config):
+            source_hash = original_verify(source, source_config_path, source_config)
+            workbook_path.write_bytes(b"replacement after baseline gate")
+            return source_hash
+
+        with patch.object(updater, "verify_baseline", side_effect=verify_then_replace), \
+                patch.object(updater, "build_band_plans", return_value=({}, [])):
+            summary = updater.run(Namespace(
+                workbook=str(workbook_path),
+                recommendations=str(recommendations_path),
+                config=str(config_path),
+                report_output=str(report_output),
+                import_output=str(import_output),
+                summary_output=str(summary_output),
+            ))
+
+        assert summary["source_workbook_sha256"] == hashlib.sha256(original_bytes).hexdigest()
+        assert workbook_path.read_bytes() == b"replacement after baseline gate"
+        imported = load_workbook(import_output, read_only=True, data_only=False)
+        assert imported.sheetnames == ["RateGroup Export"]
+        assert list(imported["RateGroup Export"].values) == [tuple(HEADERS)]
+        imported.close()
+        assert report_output.exists()
+        assert summary_output.exists()
+
+
+def check_input_output_path_collisions() -> None:
+    updater = load_updater()
+    cases = [
+        ("report-workbook", "workbook", "report"),
+        ("import-recommendations", "recommendations", "import"),
+        ("summary-config", "config", "summary"),
+        ("report-manifest", "manifest", "report"),
+        ("report-import", "report", "import"),
+        ("report-summary", "report", "summary"),
+        ("import-summary", "import", "summary"),
+    ]
+    with tempfile.TemporaryDirectory(prefix="vipcars-path-collisions-") as raw_temp:
+        root = Path(raw_temp)
+        for case_name, left_name, right_name in cases:
+            temp = root / case_name
+            temp.mkdir()
+            workbook_path = temp / "baseline.xlsx"
+            workbook_path.write_bytes(b"synthetic baseline")
+            recommendations_path = temp / "recommendations.json"
+            recommendations_path.write_text("{}", encoding="utf-8")
+            manifest_path = temp / "baseline-manifest.json"
+            manifest_path.write_text(json.dumps(confirmed_manifest(workbook_path)), encoding="utf-8")
+            config_path = temp / "config.json"
+            config_path.write_text(json.dumps({
+                "baseline_manifest_file": str(manifest_path),
+            }), encoding="utf-8")
+            paths = {
+                "workbook": workbook_path,
+                "recommendations": recommendations_path,
+                "config": config_path,
+                "manifest": manifest_path,
+                "report": temp / "report.xlsx",
+                "import": temp / "import.xlsx",
+                "summary": temp / "summary.json",
+            }
+            paths[right_name] = paths[left_name]
+            input_snapshots = {
+                path: path.read_bytes()
+                for path in (workbook_path, recommendations_path, config_path, manifest_path)
+            }
+
+            expect_value_error(
+                lambda: updater.run(Namespace(
+                    workbook=str(workbook_path),
+                    recommendations=str(recommendations_path),
+                    config=str(config_path),
+                    report_output=str(paths["report"]),
+                    import_output=str(paths["import"]),
+                    summary_output=str(paths["summary"]),
+                )),
+                "path collision",
+            )
+            assert all(path.read_bytes() == content for path, content in input_snapshots.items())
+            for output_path in {paths["report"], paths["import"], paths["summary"]} - set(input_snapshots):
+                assert not output_path.exists(), (case_name, output_path)
 
 
 def check_shared_absolute_plans_and_application() -> None:
@@ -751,6 +945,15 @@ def check_production_end_to_end() -> None:
 
     with tempfile.TemporaryDirectory(prefix="vipcars-absolute-integration-") as raw_temp:
         temp = Path(raw_temp)
+        manifest_path = temp / "confirmed-baseline-manifest.json"
+        manifest_path.write_text(
+            json.dumps(confirmed_manifest(BASELINE_PATH)),
+            encoding="utf-8",
+        )
+        test_config = deepcopy(config)
+        test_config["baseline_manifest_file"] = str(manifest_path)
+        config_path = temp / "rate-update-config.json"
+        config_path.write_text(json.dumps(test_config), encoding="utf-8")
         recommendations_path = temp / "recommendations.json"
         payload = generate_real_recommendations(recommendations_path)
         check_js_payload(payload)
@@ -761,7 +964,7 @@ def check_production_end_to_end() -> None:
             sys.executable, str(SCRIPT),
             "--workbook", str(BASELINE_PATH),
             "--recommendations", str(recommendations_path),
-            "--config", str(CONFIG_PATH),
+            "--config", str(config_path),
             "--report-output", str(report_path),
             "--import-output", str(import_path),
             "--summary-output", str(summary_path),
@@ -857,6 +1060,8 @@ def main() -> None:
     check_production_contract_and_baseline()
     check_expansion_preserves_formatting()
     check_header_and_baseline_rejections()
+    check_immutable_workbook_snapshot()
+    check_input_output_path_collisions()
     check_shared_absolute_plans_and_application()
     check_rank_fallbacks_and_quantized_floor()
     check_full_band_blocking()

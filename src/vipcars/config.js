@@ -27,6 +27,14 @@ function parseCliArgs(argv) {
       args.help = true;
       continue;
     }
+    if (key === "resume") {
+      args.resume = true;
+      continue;
+    }
+    if (key === "network-results") {
+      args.networkResults = true;
+      continue;
+    }
     const value = argv[index + 1];
     if (value == null || value.startsWith("--")) {
       throw new Error(`Missing value for argument: ${token}`);
@@ -294,6 +302,13 @@ function loadConfig(argv) {
     "attemptBudgetMs",
     90000
   );
+  const outputCoverage = path.resolve(
+    cli.outputCoverage ||
+    cli["output-coverage"] ||
+    fileConfig.outputCoverage ||
+    fileConfig["output-coverage"] ||
+    path.join("output", "vipcars-coverage.csv")
+  );
 
   return {
     baseUrl: normalizeWhitespace(merged.baseUrl || "https://www.vipcars.com"),
@@ -316,6 +331,9 @@ function loadConfig(argv) {
     timeoutMs: Number.parseInt(merged.timeoutMs || merged["timeout-ms"] || "45000", 10),
     attemptBudgetMs,
     jobBudgetMs,
+    resume: cli.resume === true,
+    networkResults: cli.networkResults === true || fileConfig.networkResults === true,
+    resumeStatePath: `${outputCoverage}.resume.json`,
     locationConcurrency: Number.parseInt(merged.locationConcurrency || merged["location-concurrency"] || "1", 10),
     headless: merged.headless !== false,
     outputCsv: path.resolve(
@@ -325,13 +343,7 @@ function loadConfig(argv) {
       fileConfig["output-csv"] ||
       path.join("output", "vipcars-results.csv")
     ),
-    outputCoverage: path.resolve(
-      cli.outputCoverage ||
-      cli["output-coverage"] ||
-      fileConfig.outputCoverage ||
-      fileConfig["output-coverage"] ||
-      path.join("output", "vipcars-coverage.csv")
-    ),
+    outputCoverage,
     artifactsDir: path.resolve(
       cli.artifactsDir ||
       cli["artifacts-dir"] ||
@@ -367,6 +379,8 @@ Options:
   --durations-days "2,3"
   --attempt-budget-ms 90000
   --job-budget-ms 10200000
+  --resume
+  --network-results  Experimental response pagination (not enabled by default)
   --output-csv PATH
   --output-coverage PATH
   --headed

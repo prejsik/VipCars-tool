@@ -791,6 +791,16 @@ runAsyncTest("VipCars recognizes an explicit no-results page", async () => {
   assert.equal(outcome, "no-results");
 });
 
+runAsyncTest("VipCars rejects offer currency mismatches instead of returning false empty results", async () => {
+  const scraper = new VipCarsScraper({ currency: "EUR", currentDurationDays: 2 });
+  const page = { evaluate: async () => [{
+    provider: "MM Cars Rental", priceText: "USD 120.00", payNowText: "USD 10.00",
+    automatic: true, carName: "Automatic car", vehicleCategory: "Compact"
+  }] };
+  await assert.rejects(() => scraper.extractSearchOffers(page, "Warsaw"),
+    (error) => error.code === "SEARCH_CURRENCY_MISMATCH" && error.retryable === false);
+});
+
 runAsyncTest("VipCars retries timeouts at most twice", async () => {
   const timeoutScraper = new VipCarsScraper({});
   let timeoutAttempts = 0;

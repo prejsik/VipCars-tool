@@ -94,20 +94,16 @@ async function applyAutomaticTransmissionFilter(page, options = {}) {
   if (!initiallyChecked) {
     ensureFilterBudget(deadlineAt, initialState);
     try {
-      await filter.check({ force: true, timeout: remainingMs(deadlineAt) });
+      await filter.evaluate(
+        (element) => element.click(),
+        undefined,
+        { timeout: remainingMs(deadlineAt) }
+      );
     } catch (error) {
-      ensureFilterBudget(deadlineAt, initialState);
-      try {
-        await page.locator("label", { has: filter }).click({
-          force: true,
-          timeout: remainingMs(deadlineAt)
-        });
-      } catch (fallbackError) {
-        if (Date.now() >= deadlineAt || isTimeoutError(error) || isTimeoutError(fallbackError)) {
-          throw filterTimeout(initialState);
-        }
-        return false;
+      if (Date.now() >= deadlineAt || isTimeoutError(error)) {
+        throw filterTimeout(initialState);
       }
+      return false;
     }
   }
 
