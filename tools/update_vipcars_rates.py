@@ -668,6 +668,13 @@ def prepare_workbook(source_bytes: bytes, worksheet_name: str, rate_zones: list[
     worksheet = workbook[worksheet_name]
     expand_pickup_ranges(worksheet, bands)
     expanded_rows = expand_rate_zones(worksheet, rate_zones)
+    # Source exports can carry a PFAR-only filter that hides the recommended groups.
+    worksheet.auto_filter.filterColumn = []
+    worksheet.auto_filter.sortState = None
+    worksheet.auto_filter.ref = worksheet.calculate_dimension()
+    worksheet.sheet_properties.filterMode = False
+    for dimension in worksheet.row_dimensions.values():
+        dimension.hidden = False
     return workbook, worksheet, expanded_rows
 
 

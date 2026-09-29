@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { sanitizeMessage } = require("./diagnostics");
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -94,6 +95,83 @@ function groupLocationOffers(rows) {
       offers: [...offers].sort((left, right) => dailyRate(left) - dailyRate(right))
     }))
     .sort((left, right) => left.location.localeCompare(right.location));
+}
+
+function checkKey(row) {
+  return `${row.pickup_date}|${row.duration_days}|${row.location || "Unknown"}`;
+}
+
+function buildReportScenarios(rows, coverageRows) {
+  if (!coverageRows.length) {
+    return groupByScenario(rows).map((scenario) => ({
+      ...scenario,
+      locations: groupLocationOffers(scenario.rows)
+    }));
+  }
+
+  const offerGroups = new Map();
+  for (const row of rows) {
+    const key = checkKey(row);
+    if (!offerGroups.has(key)) {
+      offerGroups.set(key, {
+        location: row.location || "Unknown",
+        pickupDate: row.pickup_date,
+        dropoffDate: row.dropoff_date,
+        durationDays: row.duration_days,
+        offers: []
+      });
+    }
+    offerGroups.get(key).offers.push(row);
+  }
+
+  const scenarios = new Map();
+  const addLocation = (values, group) => {
+    const key = `${values.pickupDate}|${values.dropoffDate}|${values.durationDays}`;
+    if (!scenarios.has(key)) {
+      scenarios.set(key, { ...values, locations: [] });
+    }
+    scenarios.get(key).locations.push(group);
+  };
+  const coveredChecks = new Set();
+
+  for (const coverage of coverageRows) {
+    const key = checkKey(coverage);
+    const offerGroup = offerGroups.get(key);
+    coveredChecks.add(key);
+    addLocation({
+      pickupDate: coverage.pickup_date,
+      dropoffDate: coverage.dropoff_date || offerGroup?.dropoffDate || "",
+      durationDays: coverage.duration_days
+    }, {
+      location: coverage.location || "Unknown",
+      offers: [...(offerGroup?.offers || [])].sort((left, right) => dailyRate(left) - dailyRate(right)),
+      coverage
+    });
+  }
+
+  for (const [key, group] of offerGroups) {
+    if (coveredChecks.has(key)) continue;
+    addLocation({
+      pickupDate: group.pickupDate,
+      dropoffDate: group.dropoffDate,
+      durationDays: group.durationDays
+    }, {
+      location: group.location,
+      offers: [...group.offers].sort((left, right) => dailyRate(left) - dailyRate(right)),
+      coverage: null,
+      missingCoverage: true
+    });
+  }
+
+  return [...scenarios.values()]
+    .map((scenario) => ({
+      ...scenario,
+      locations: scenario.locations.sort((left, right) => left.location.localeCompare(right.location))
+    }))
+    .sort((left, right) => {
+      if (left.pickupDate !== right.pickupDate) return left.pickupDate.localeCompare(right.pickupDate);
+      return Number(left.durationDays || 0) - Number(right.durationDays || 0);
+    });
 }
 
 function isMmCarsProvider(value) {
@@ -213,6 +291,58 @@ function mmOfferSummary(offers) {
   };
 }
 
+function coveragePresentation(group) {
+  const coverage = group.coverage;
+  if (!coverage) {
+    return group.missingCoverage ? {
+      status: "incomplete",
+      label: "Niepełne",
+      error: "Brak wpisu pokrycia dla zapisanych ofert."
+    } : null;
+  }
+
+  const status = String(coverage.status || "").trim().toLowerCase();
+  const rawResultCount = String(coverage.result_count ?? "").trim();
+  const resultCount = /^\d+$/.test(rawResultCount) ? Number(rawResultCount) : NaN;
+  const error = sanitizeMessage(coverage.error);
+  if (status === "complete") {
+    if (Number.isSafeInteger(resultCount) && resultCount === 0 && group.offers.length === 0) {
+      return { status: "no-offers", label: "Brak ofert (zweryfikowane)", error: "" };
+    }
+    if (!Number.isSafeInteger(resultCount) || resultCount !== group.offers.length) {
+      return {
+        status: "incomplete",
+        label: "Niepełne dane raportu",
+        error: error || "Liczba zapisanych ofert nie zgadza się z kompletną kontrolą."
+      };
+    }
+    return { status: "complete", label: "", error: "" };
+  }
+  if (status === "pending") {
+    return { status: "pending", label: "Oczekuje", error: error || "Kontrola oczekuje na wykonanie." };
+  }
+  return { status: "incomplete", label: "Niepełne", error: error || "Kontrola nie została ukończona." };
+}
+
+function groupMmSummary(group, presentation = coveragePresentation(group)) {
+  const summary = mmOfferSummary(group.offers);
+  if (!presentation || !["incomplete", "pending"].includes(presentation.status)) return summary;
+  return {
+    offer: summary.offer,
+    rankLabel: presentation.label,
+    cheaperOffers: "Brak danych",
+    state: presentation.status,
+    className: summary.offer ? "mm" : ""
+  };
+}
+
+function buildCoverageStatus(presentation) {
+  if (!presentation || presentation.status === "complete") return "";
+  const error = presentation.error
+    ? `<div class="check-error">${escapeHtml(presentation.error)}</div>` : "";
+  return `<div class="check-status check-status-${escapeHtml(presentation.status)}">${escapeHtml(presentation.label)}</div>${error}`;
+}
+
 function buildMmSummaryCells(summary) {
   const classAttribute = summary.className ? ` class="${summary.className}"` : " class=\"muted\"";
   return `<td${classAttribute}>${escapeHtml(formatDailyRate(summary.offer))}</td>
@@ -222,10 +352,20 @@ function buildMmSummaryCells(summary) {
 
 function buildScenarioTable(scenario, index, total) {
   const rows = scenario.locations.map((group, rowIndex) => {
-    const mmSummary = mmOfferSummary(group.offers);
-    return `<tr data-location="${escapeHtml(group.location)}" data-mm-state="${escapeHtml(mmSummary.state)}">
+    const presentation = coveragePresentation(group);
+    const mmSummary = groupMmSummary(group, presentation);
+    const checkStatus = presentation ? ` data-check-status="${escapeHtml(presentation.status)}"` : "";
+    const rowStart = `<tr data-location="${escapeHtml(group.location)}" data-mm-state="${escapeHtml(mmSummary.state)}"${checkStatus}>`;
+    if (presentation && group.offers.length === 0) {
+      return `${rowStart}
         <td class="index">${rowIndex}</td>
         <td>${escapeHtml(group.location)}</td>
+        <td class="coverage-state-cell" colspan="11">${buildCoverageStatus(presentation)}</td>
+      </tr>`;
+    }
+    return `${rowStart}
+        <td class="index">${rowIndex}</td>
+        <td>${escapeHtml(group.location)}${buildCoverageStatus(presentation)}</td>
         ${buildOfferCells(group.offers, 0)}
         ${buildOfferCells(group.offers, 1)}
         ${buildOfferCells(group.offers, 2)}
@@ -286,7 +426,7 @@ function buildMultiFilter(id, label, options) {
 
 function reportSummary(scenarios) {
   const locationGroups = scenarios.flatMap((scenario) => scenario.locations);
-  const mmStates = locationGroups.map((group) => mmOfferSummary(group.offers).state);
+  const mmStates = locationGroups.map((group) => groupMmSummary(group).state);
   return {
     scenarioCount: scenarios.length,
     locationCheckCount: locationGroups.length,
@@ -296,27 +436,41 @@ function reportSummary(scenarios) {
   };
 }
 
+function effectiveCoverageSummary(scenarios) {
+  const plannedGroups = scenarios.flatMap((scenario) => scenario.locations)
+    .filter((group) => group.coverage);
+  const statuses = plannedGroups.map((group) => coveragePresentation(group).status);
+  return {
+    plannedCount: plannedGroups.length,
+    withOffersCount: statuses.filter((status) => status === "complete").length,
+    withoutOffersCount: statuses.filter((status) => status === "no-offers").length,
+    incompleteCount: statuses.filter((status) => !["complete", "no-offers"].includes(status)).length
+  };
+}
+
 function buildHtmlReport(rows, generatedAt = new Date().toISOString(), coverageRows = []) {
-  const scenarios = groupByScenario(rows).map((scenario) => ({
-    ...scenario,
-    locations: groupLocationOffers(scenario.rows)
-  }));
+  const scenarios = buildReportScenarios(rows, coverageRows);
   const summary = reportSummary(scenarios);
-  const incompleteCoverageCount = coverageRows.filter((row) => row.status !== "complete").length;
-  const coverageWithOffersCount = coverageRows.filter((row) => row.status === "complete" && Number(row.result_count) > 0).length;
-  const coverageWithoutOffersCount = coverageRows.filter((row) => row.status === "complete" && Number(row.result_count) === 0).length;
+  const coverageSummaryCounts = effectiveCoverageSummary(scenarios);
+  const incompleteCoverageCount = coverageSummaryCounts.incompleteCount;
+  const coverageWithOffersCount = coverageSummaryCounts.withOffersCount;
+  const coverageWithoutOffersCount = coverageSummaryCounts.withoutOffersCount;
   const coverageSummary = coverageRows.length
-    ? ` | kontrole planowane: ${coverageRows.length} | z ofertami: ${coverageWithOffersCount} | bez ofert: ${coverageWithoutOffersCount} | niepełne: ${incompleteCoverageCount}`
+    ? ` | kontrole planowane: ${coverageSummaryCounts.plannedCount} | z ofertami: ${coverageWithOffersCount} | bez ofert: ${coverageWithoutOffersCount} | niepełne: ${incompleteCoverageCount}`
     : "";
   const coverageWarning = incompleteCoverageCount
-    ? `<div class="coverage-warning">Raport częściowy: ${incompleteCoverageCount} z ${coverageRows.length} kontroli nie ma kompletnych danych.</div>`
+    ? `<div class="coverage-warning">Raport częściowy: ${incompleteCoverageCount} z ${coverageSummaryCounts.plannedCount} kontroli nie ma kompletnych danych.</div>`
     : "";
-  const locations = uniqueValues(rows.map((row) => row.location || "Unknown"), (left, right) => left.localeCompare(right));
-  const durations = uniqueValues(rows.map((row) => row.duration_days), (left, right) => Number(left) - Number(right));
+  const locations = uniqueValues(scenarios.flatMap((scenario) => scenario.locations.map((group) => group.location)),
+    (left, right) => left.localeCompare(right));
+  const durations = uniqueValues(scenarios.map((scenario) => scenario.durationDays),
+    (left, right) => Number(left) - Number(right));
   const locationFilter = buildMultiFilter("filter-location", "Lokalizacja", locations.map((location) => ({ value: location, text: location })));
   const durationFilter = buildMultiFilter("filter-duration", "Duration", durations.map((duration) => ({ value: duration, text: `${duration} dni` })));
   const stateFilter = buildMultiFilter("filter-state", "Stan MM", [
     { value: "missing", text: "Brak MM" },
+    { value: "incomplete", text: "Dane niepełne" },
+    { value: "pending", text: "Oczekujące" },
     { value: "top1-gap", text: "Top1: przewaga ponad 2,5 EUR/d" },
     { value: "close", text: "Do 2,5 EUR/d od wyższej pozycji" },
     { value: "normal", text: "Pozostałe" }
@@ -441,6 +595,12 @@ function buildHtmlReport(rows, generatedAt = new Date().toISOString(), coverageR
     .multi-option input { flex: 0 0 auto; margin: 1px 0 0; }
     .rank-cell, .count-cell { color: var(--text); }
     .muted { color: var(--muted); }
+    .check-status { margin-top: 5px; color: var(--text); font-size: 11px; }
+    .check-status-incomplete { color: #ff8a80; }
+    .check-status-pending { color: #ffd166; }
+    .check-status-no-offers { color: var(--muted); }
+    .check-error { margin-top: 3px; color: var(--muted); font-size: 10px; font-weight: 400; overflow-wrap: anywhere; }
+    .coverage-state-cell { color: var(--text); white-space: normal; }
     @media (max-width: 1100px) {
       body { padding: 14px; }
       th, td { padding: 5px; }
@@ -480,6 +640,7 @@ function buildHtmlReport(rows, generatedAt = new Date().toISOString(), coverageR
       td:nth-child(11)::before { content: "MM EUR/d"; }
       td:nth-child(12)::before { content: "Pozycja MM"; }
       td:nth-child(13)::before { content: "Tańsze oferty"; }
+      td.coverage-state-cell::before { content: "Stan kontroli"; }
     }
   </style>
 </head>

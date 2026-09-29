@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { chromium } = require("playwright");
-const { loadConfig, printHelp } = require("../src/vipcars/config");
+const { loadConfig, normalizeTransmission, printHelp } = require("../src/vipcars/config");
 const { parseCsv } = require("../src/vipcars/reportHtml");
 const { VipCarsScraper } = require("../src/vipcars/scraper");
 const { buildRunStatus } = require("../src/vipcars/telegramAlert");
@@ -66,6 +66,11 @@ async function main() {
   assert.match(workflow, /vehicle_category:/);
   assert.match(workflow, /command\+=\(--vehicle-category "\$VEHICLE_CATEGORY"\)/);
   assert.match(workflow, /--transmission "\$TRANSMISSION"/);
+  assert.match(workflow, /normalizeTransmission\(process\.argv\[1\]\)/);
+  for (const value of ["automatic", "auto", " Automatic "]) assert.equal(normalizeTransmission(value), "automatic");
+  for (const value of ["any", "all", "dowolna"]) assert.equal(normalizeTransmission(value), "any");
+  assert.match(workflow, /if \[\[ "\$TRANSMISSION" == "automatic" \]\]; then\s+command\+=\(--network-results\)\s+fi/,
+    "Automatic scheduled searches must use the live-validated response pagination path");
   assert.match(workflow, /needs\.prepare\.outputs\.vehicle_category == ''/);
   console.log("PASS one-off category runs do not replace the daily Pages report");
 

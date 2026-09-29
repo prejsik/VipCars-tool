@@ -12,6 +12,7 @@ from argparse import Namespace
 from copy import deepcopy
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -268,14 +269,14 @@ def check_production_contract_and_baseline() -> None:
     workbook = load_workbook(BASELINE_PATH, read_only=True, data_only=False)
     sheet = workbook[config["worksheet"]]
     assert [cell.value for cell in next(sheet.iter_rows(max_row=1))] == HEADERS
-    assert sheet.max_row - 1 == 16322
+    assert sheet.max_row - 1 == 15880
     expanded_count = 0
     for row in sheet.iter_rows(min_row=2, values_only=True):
         start = datetime.strptime(row[3], "%d/%m/%Y").date()
         end = datetime.strptime(row[4], "%d/%m/%Y").date()
         expanded_count += (end - start).days + 1
         assert not any(isinstance(value, str) and value.startswith("=") for value in row)
-    assert expanded_count == 17297
+    assert expanded_count == 16842
     workbook.close()
 
 
@@ -314,6 +315,45 @@ def check_expansion_preserves_formatting() -> None:
     assert sheet["A5"].value == "CDMR"
     assert sheet.row_dimensions[5].height == 18
     assert sheet.row_dimensions[5].hidden is False
+
+
+def check_outputs_show_all_rate_groups() -> None:
+    updater = load_updater()
+    config = single_zone_config()
+    sheet = sheet_with_rows([
+        ["CFAR", 0, 0, "02/10/2026", "03/10/2026", "WAR", None, None, 40, 11, 11, 20],
+        ["PFAR", 0, 0, "02/10/2026", "02/10/2026", "WAR", None, None, 100, 42.823, 45, 55],
+    ])
+    sheet.title = "RateGroup Export"
+    sheet.auto_filter.ref = "A1:L3"
+    sheet.auto_filter.add_filter_column(0, ["PFAR"])
+    sheet.sheet_properties.filterMode = True
+    sheet.row_dimensions[2].hidden = True
+    sheet.row_dimensions[2].height = 24
+    stream = BytesIO()
+    sheet.parent.save(stream)
+    source_bytes = stream.getvalue()
+
+    book, prepared, count = updater.prepare_workbook(
+        source_bytes, sheet.title, config["rate_zones"], config["duration_bands"]
+    )
+    assert count == 3
+    saved = BytesIO()
+    book.save(saved)
+    result = load_workbook(BytesIO(saved.getvalue()))
+    output = result[sheet.title]
+    assert not any(d.hidden for d in output.row_dimensions.values()), "Output hides cheaper groups from the source filter."
+    assert not output.auto_filter.filterColumn
+    assert output.auto_filter.sortState is None
+    assert output.auto_filter.ref == "A1:L4", "Filter range must include the expanded rows."
+    assert output.sheet_properties.filterMode is False
+    assert output["J2"].value == output["J3"].value == 11
+    assert output["J4"].value == 42.823
+    assert output.row_dimensions[2].height == output.row_dimensions[3].height == 24
+    assert sheet.row_dimensions[2].hidden is True
+    assert stream.getvalue() == source_bytes
+    result.close()
+    book.close()
 
 
 def check_header_and_baseline_rejections() -> None:
@@ -972,7 +1012,7 @@ def check_production_end_to_end() -> None:
         assert result.returncode == 0, result.stderr or result.stdout
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         assert summary["source_workbook_sha256"] == baseline_hash
-        assert summary["expanded_source_row_count"] == 17297
+        assert summary["expanded_source_row_count"] == 16842
         assert summary["change_count"] == 12 * 7 * 2 == 168
         assert summary["blocked_band_count"] == 7
         assert {item["duration_band"] for item in summary["blocked_bands"]} == {"9+"}
@@ -980,7 +1020,10 @@ def check_production_end_to_end() -> None:
         imported = load_workbook(import_path, read_only=False, data_only=False)
         assert imported.sheetnames == ["RateGroup Export"]
         import_sheet = imported["RateGroup Export"]
-        assert import_sheet.max_row - 1 == 17297
+        assert import_sheet.max_row - 1 == 16842
+        assert not any(d.hidden for d in import_sheet.row_dimensions.values())
+        assert not import_sheet.auto_filter.filterColumn
+        assert import_sheet.auto_filter.ref == "A1:L16843"
         actual_rows = iter(import_sheet.iter_rows(min_row=2, values_only=True))
         approved_positions = 0
         for day, expected in iter_expected_source_rows(source_rows):
@@ -1010,6 +1053,8 @@ def check_production_end_to_end() -> None:
             "RateGroup Export", "Changed Positions", "Recommendations Review", "Validation"
         ]
         report_sheet = report["RateGroup Export"]
+        assert not any(d.hidden for d in report_sheet.row_dimensions.values())
+        assert not report_sheet.auto_filter.filterColumn
         for report_row, import_row in zip(
             report_sheet.iter_rows(values_only=True), import_sheet.iter_rows(values_only=True)
         ):
@@ -1059,6 +1104,7 @@ def check_production_end_to_end() -> None:
 def main() -> None:
     check_production_contract_and_baseline()
     check_expansion_preserves_formatting()
+    check_outputs_show_all_rate_groups()
     check_header_and_baseline_rejections()
     check_immutable_workbook_snapshot()
     check_input_output_path_collisions()

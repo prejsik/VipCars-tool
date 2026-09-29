@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const fs = require("node:fs");
+const path = require("node:path");
 
 const { parseCsv } = require("./reportHtml");
 
@@ -11,7 +12,7 @@ function buildRunStatus(coverageRows, scrapeResult = "success") {
   const complete = coverageRows.filter((row) => row.status === "complete").length;
   const errors = coverageRows.filter((row) => row.status === "incomplete");
   const pending = coverageRows.length - complete - errors.length;
-  const timeouts = errors.filter((row) => /timeout/i.test(row.error || "")).length;
+  const timeouts = errors.filter((row) => /timeout|timed\s+out/i.test(row.error || "")).length;
   if (!coverageRows.length) {
     return "czesciowy; brak danych kontroli";
   }
@@ -19,6 +20,26 @@ function buildRunStatus(coverageRows, scrapeResult = "success") {
     : scrapeResult === "success" ? "gotowy" : "wymaga sprawdzenia";
   return `${status}; kompletne kontrole: ${complete}/${coverageRows.length}; `
     + `bledy: ${errors.length} (timeout: ${timeouts}); niedokonczone: ${pending}; GitHub: ${scrapeResult}`;
+}
+
+function buildWorkbookSection({ baselineStatus, workbookStatus, reportExists, importExists, pageUrl } = {}) {
+  if (!["confirmed_imported", "verified_live"].includes(baselineStatus)) {
+    return "Pliki stawek XLSX: zablokowane. Brak potwierdzenia aktualnosci pliku bazowego w Wheels; import nie zostal wygenerowany.";
+  }
+  if (workbookStatus !== "success" || !reportExists || !importExists || !pageUrl) {
+    return "Pliki stawek XLSX: nie powstaly kompletne pliki. Blad generowania lub walidacji; szczegoly w GitHub Actions.";
+  }
+  const base = `${String(pageUrl).replace(/\/+$/, "")}/`;
+  return `Rekomendacje XLSX:\n${base}vipcars-recommendations.xlsx\n\nImport XLSX:\n${base}vipcars-rates-import-ready.xlsx`;
+}
+
+function buildWorkbookSectionFromFiles(manifestPath, workbookStatus, pageUrl, outputDir = "output") {
+  let baselineStatus;
+  try { baselineStatus = JSON.parse(fs.readFileSync(manifestPath, "utf8")).status; }
+  catch { baselineStatus = undefined; }
+  return buildWorkbookSection({ baselineStatus, workbookStatus, pageUrl,
+    reportExists: fs.existsSync(path.join(outputDir, "vipcars-recommendations.xlsx")),
+    importExists: fs.existsSync(path.join(outputDir, "vipcars-rates-import-ready.xlsx")) });
 }
 
 function classifyStartDatesWithoutMm(rows, coverageRows) {
@@ -84,7 +105,9 @@ function buildAlertFromFiles(csvPath, coveragePath) {
 }
 
 if (require.main === module) {
-  if (process.argv[2] === "--status") {
+  if (process.argv[2] === "--workbooks") {
+    process.stdout.write(`${buildWorkbookSectionFromFiles(process.argv[3], process.argv[4], process.argv[5], process.argv[6])}\n`);
+  } else if (process.argv[2] === "--status") {
     const coveragePath = process.argv[3];
     const coverage = fs.existsSync(coveragePath) ? parseCsv(fs.readFileSync(coveragePath, "utf8")) : [];
     process.stdout.write(`${buildRunStatus(coverage, process.argv[4])}\n`);
@@ -100,6 +123,8 @@ if (require.main === module) {
 
 module.exports = {
   buildRunStatus,
+  buildWorkbookSection,
+  buildWorkbookSectionFromFiles,
   buildAlertFromFiles,
   buildMissingMmStartDateAlert,
   classifyStartDatesWithoutMm

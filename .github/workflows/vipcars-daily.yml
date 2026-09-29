@@ -129,6 +129,7 @@ jobs:
           currency="${INPUT_CURRENCY:-$default_currency}"
           vehicle_category="$INPUT_VEHICLE_CATEGORY"
           transmission="${INPUT_TRANSMISSION:-$default_transmission}"
+          transmission="$(node -e 'process.stdout.write(require("./src/vipcars/config").normalizeTransmission(process.argv[1]))' -- "$transmission")"
 
           plan_command=(node src/vipcars/pickupPlan.js --dates \
             --config vipcars.config.example.json \
@@ -260,6 +261,10 @@ jobs:
             --artifacts-dir "artifacts/vipcars/chunk-${CHUNK_INDEX}" \
             --output-csv "output/vipcars-results-chunk-${CHUNK_INDEX}.csv" \
             --output-coverage "output/vipcars-coverage-chunk-${CHUNK_INDEX}.csv")
+
+          if [[ "$TRANSMISSION" == "automatic" ]]; then
+            command+=(--network-results)
+          fi
 
           if [[ -n "$PICKUP_ROLLING_DAYS" ]]; then
             command+=(--pickup-rolling-days "$PICKUP_ROLLING_DAYS")
@@ -435,7 +440,6 @@ jobs:
             output/vipcars-rate-update-summary.json
             output/vipcars-run-log.txt
             output/vipcars-run-error.txt
-            chunk-artifacts/**
           if-no-files-found: warn
           retention-days: 14
 
@@ -471,11 +475,8 @@ jobs:
             alert_section=$(printf '\n\n%s' "$mm_alert")
           fi
 
-          if [[ "$RATE_WORKBOOK_STATUS" == "success" && -f output/vipcars-recommendations.xlsx && -f output/vipcars-rates-import-ready.xlsx ]]; then
-            rate_section=$(printf '\n\nRekomendacje XLSX:\n%svipcars-recommendations.xlsx\n\nImport XLSX:\n%svipcars-rates-import-ready.xlsx' "$PAGE_URL" "$PAGE_URL")
-          else
-            rate_section=$(printf '\n\nPliki stawek XLSX: pominiete, poniewaz coverage lub walidacja importu nie byly kompletne.')
-          fi
+          rate_section="$(node src/vipcars/telegramAlert.js --workbooks input/vipcars-baseline-manifest.json "$RATE_WORKBOOK_STATUS" "$PAGE_URL")"
+          rate_section=$(printf '\n\n%s' "$rate_section")
 
           message=$(printf 'VipCars: raport HTML jest %s.\n\nZakres:\n- chunki: %s\n- lokalizacje: %s\n- rolling days: %s\n- durations: %s\n- waluta: %s%s\n\nRaport HTML:\n%sreport.html%s\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$status_text" "$CHUNK_TOTAL" "$LOCATIONS" "$PICKUP_ROLLING_DAYS" "$DURATIONS" "$CURRENCY" "$alert_section" "$PAGE_URL" "$rate_section" "$ARTIFACT_URL" "$RUN_URL")
 

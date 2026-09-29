@@ -388,4 +388,4 @@ Options:
 `);
 }
 
-module.exports = { loadConfig, normalizeVehicleCategory, printHelp };
+module.exports = { loadConfig, normalizeVehicleCategory, normalizeTransmission, printHelp };
