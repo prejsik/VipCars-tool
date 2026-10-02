@@ -341,11 +341,13 @@ def duration_target(decision, config, context):
     floor_settings = config["minimum_rates"]
     floor_pln = Decimal(0)
     for band in floor_settings["bands"]:
+        start_date = band.get("start_date")
         end_date = band.get("end_date", floor_settings["end_date"])
         max_days = band["max_days"]
         days = int(decision["rental_days"])
         if (days >= int(band["min_days"])
                 and (max_days is None or days <= int(max_days))
+                and (start_date is None or parse_date(decision["pickup_date"]) >= parse_date(start_date))
                 and (end_date is None or parse_date(decision["pickup_date"]) <= parse_date(end_date))):
             floor_pln = max(floor_pln, decimal_number(band["min_pln_gross_day"], "minimum gross PLN"))
     if floor_pln < 0:

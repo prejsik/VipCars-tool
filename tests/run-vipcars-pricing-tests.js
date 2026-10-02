@@ -182,10 +182,10 @@ function testRankSelectionAndFloors() {
   assert.equal(exactExpiry.data_quality_status, "floor_blocks_top3");
 
   const afterExpiry = buildCase({ competitorRates: [6, 7, 8], pickupDate: "2026-10-26" }).decisions[0];
-  assert.equal(afterExpiry.minimum_supplier_gross_pln_day, 0);
-  assert.equal(afterExpiry.minimum_net_rate_eur_day, 0);
-  assert.equal(afterExpiry.target_rank, 1);
-  assert.equal(afterExpiry.site_target_net_rate_eur_day, 3.726);
+  assert.equal(afterExpiry.minimum_supplier_gross_pln_day, 40);
+  assert.equal(afterExpiry.minimum_net_rate_eur_day, 8.130081300813009);
+  assert.equal(afterExpiry.target_rank, null);
+  assert.equal(afterExpiry.data_quality_status, "floor_blocks_top3");
 
   const sevenDays = buildCase({ competitorRates: [14, 15, 16], durationDays: 7 }).decisions[0];
   assert.equal(sevenDays.minimum_supplier_gross_pln_day, 40);
@@ -193,9 +193,8 @@ function testRankSelectionAndFloors() {
   for (const durationDays of [7, 8]) {
     for (const pickupDate of ["2026-10-25", "2026-10-26"]) {
       const decision = buildCase({ competitorRates: [11, 13, 15], durationDays, pickupDate }).decisions[0];
-      const expired = pickupDate === "2026-10-26";
-      assert.equal(decision.minimum_supplier_gross_pln_day, expired ? 0 : 40);
-      assert.equal(decision.target_rank, expired ? 1 : 2);
+      assert.equal(decision.minimum_supplier_gross_pln_day, 40);
+      assert.equal(decision.target_rank, 2);
     }
   }
 
@@ -274,19 +273,21 @@ function testContractAndRawCalculations() {
   });
 }
 
-function testPermanentLongRentalFloor() {
+function testDatedAndPermanentFloors() {
   const config = JSON.parse(fs.readFileSync(path.join(__dirname, "../vipcars-rate-update.config.json"), "utf8"));
   for (const options of [{}, { minimumRates: config.minimum_rates }]) {
     for (const pickupDate of ["2026-10-25", "2026-10-26", "2035-01-01"]) {
-      for (const durationDays of [9, 14, 21, 30]) {
+      for (const durationDays of [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 21, 30]) {
         const decision = buildCase({
           competitorRates: [11, 13, 15], pickupDate, durationDays, options
         }).decisions[0];
-        assert.equal(decision.minimum_supplier_gross_pln_day, 40);
-        assert.equal(decision.minimum_net_rate_eur_day, 8.130081300813009);
-        assert.equal(decision.target_rank, 2);
-        assert.equal(decision.site_target_net_rate_eur_day, 8.468);
-        assert.ok(decision.site_target_net_rate_eur_day * 1.23 * 4 >= 40);
+        const oldShortRental = pickupDate === "2026-10-25" && durationDays <= 6;
+        const floor = oldShortRental ? 30 : 40;
+        assert.equal(decision.minimum_supplier_gross_pln_day, floor);
+        assert.equal(decision.minimum_net_rate_eur_day, oldShortRental ? 6.097560975609756 : 8.130081300813009);
+        assert.equal(decision.target_rank, oldShortRental ? 1 : 2);
+        assert.equal(decision.site_target_net_rate_eur_day, oldShortRental ? 7.113 : 8.468);
+        assert.ok(decision.site_target_net_rate_eur_day * 1.23 * 4 >= floor);
       }
     }
     const blocked = buildCase({
@@ -294,6 +295,20 @@ function testPermanentLongRentalFloor() {
     }).decisions[0];
     assert.equal(blocked.action, "hold");
     assert.equal(blocked.data_quality_status, "floor_blocks_top3");
+  }
+  const futureOnly = {
+    minimumRates: { end_date: "2026-10-25", bands: [
+      { min_days: 2, max_days: 8, min_pln_gross_day: 40, start_date: "2026-10-26", end_date: null }
+    ] }
+  };
+  assert.equal(buildCase({ competitorRates: [11, 13, 15], options: futureOnly }).decisions[0]
+    .minimum_supplier_gross_pln_day, 0);
+  for (const startDate of ["invalid", "2026-02-30"]) {
+    assert.throws(() => buildCase({ competitorRates: [11, 13, 15], options: {
+      minimumRates: { end_date: "2026-10-25", bands: [
+        { min_days: 2, max_days: 8, min_pln_gross_day: 40, start_date: startDate, end_date: null }
+      ] }
+    } }), /start_date/i);
   }
 }
 
@@ -512,7 +527,7 @@ async function testLoadOptionsAndCli(tempDir) {
 async function main() {
   await testExchangeRate();
   testRankSelectionAndFloors();
-  testPermanentLongRentalFloor();
+  testDatedAndPermanentFloors();
   testContractAndRawCalculations();
   testDataQualityGuards();
 

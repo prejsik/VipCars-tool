@@ -37,7 +37,8 @@
     "bands": [
       { "min_days": 2, "max_days": 6, "min_pln_gross_day": 30 },
       { "min_days": 7, "max_days": 8, "min_pln_gross_day": 40 },
-      { "min_days": 9, "max_days": null, "min_pln_gross_day": 40, "end_date": null }
+      { "min_days": 9, "max_days": null, "min_pln_gross_day": 40, "end_date": null },
+      { "min_days": 2, "max_days": 8, "min_pln_gross_day": 40, "start_date": "2026-10-26", "end_date": null }
     ]
   },
   "duration_bands": [

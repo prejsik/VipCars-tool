@@ -18,7 +18,8 @@ const DEFAULT_MINIMUM_RATES = {
   bands: [
     { min_days: 2, max_days: 6, min_pln_gross_day: 30 },
     { min_days: 7, max_days: 8, min_pln_gross_day: 40 },
-    { min_days: 9, max_days: null, min_pln_gross_day: 40, end_date: null }
+    { min_days: 9, max_days: null, min_pln_gross_day: 40, end_date: null },
+    { min_days: 2, max_days: 8, min_pln_gross_day: 40, start_date: "2026-10-26", end_date: null }
   ]
 };
 
@@ -191,6 +192,7 @@ function normalizeMinimumRates(rawMinimumRates) {
     min_days: Number(band?.min_days),
     max_days: band?.max_days === null ? null : Number(band?.max_days),
     min_pln_gross_day: Number(band?.min_pln_gross_day),
+    start_date: band.start_date ?? null,
     end_date: Object.hasOwn(band, "end_date") ? band.end_date : endDate
   }));
   for (const band of bands) {
@@ -206,6 +208,12 @@ function normalizeMinimumRates(rawMinimumRates) {
     }
     if (band.end_date !== null && !isValidIsoDate(band.end_date)) {
       throw new Error("Minimum-rate band end_date must be a valid date or null for a permanent floor.");
+    }
+    if (band.start_date !== null && (
+      !isValidIsoDate(band.start_date)
+      || (band.end_date !== null && band.start_date > band.end_date)
+    )) {
+      throw new Error("Minimum-rate band start_date must be a valid date not after end_date.");
     }
   }
   return { end_date: endDate, bands };
@@ -312,6 +320,7 @@ function minimumFloor(check, settings) {
   const band = settings.minimumRates.bands.find((item) => (
     days >= item.min_days
     && (item.max_days === null || days <= item.max_days)
+    && (item.start_date === null || String(check.pickup_date) >= item.start_date)
     && (item.end_date === null || String(check.pickup_date) <= item.end_date)
   ));
   const supplierGrossPln = band?.min_pln_gross_day ?? 0;

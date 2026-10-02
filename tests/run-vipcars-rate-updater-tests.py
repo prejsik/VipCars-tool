@@ -81,14 +81,10 @@ def single_zone_config(*, bands: list[dict] | None = None, groups: list[str] | N
 
 
 def floor_pln(pickup_date: str, rental_days: int) -> Decimal:
-    if rental_days >= 9:
+    if rental_days >= 7:
         return Decimal(40)
-    if date.fromisoformat(pickup_date) > date(2026, 10, 25):
-        return Decimal(0)
     if 2 <= rental_days <= 6:
-        return Decimal(30)
-    if 7 <= rental_days <= 8:
-        return Decimal(40)
+        return Decimal(30 if date.fromisoformat(pickup_date) <= date(2026, 10, 25) else 40)
     return Decimal(0)
 
 
@@ -260,6 +256,8 @@ def check_production_contract_and_baseline() -> None:
             {"min_days": 2, "max_days": 6, "min_pln_gross_day": 30},
             {"min_days": 7, "max_days": 8, "min_pln_gross_day": 40},
             {"min_days": 9, "max_days": None, "min_pln_gross_day": 40, "end_date": None},
+            {"min_days": 2, "max_days": 8, "min_pln_gross_day": 40,
+             "start_date": "2026-10-26", "end_date": None},
         ],
     }
     assert config["duration_bands"] == [
@@ -750,7 +748,7 @@ def check_disabled_bands_and_post_policy_rates() -> None:
         expiry_band = {"column": "K", "label": str(days), "min_days": days, "max_days": days}
         expiry_config = single_zone_config(bands=[expiry_band])
         for pickup_date, expected_minimum, expected_rank in (
-                ("2026-10-25", 40, 2), ("2026-10-26", 0, 1)):
+                ("2026-10-25", 40, 2), ("2026-10-26", 40, 2)):
             decision = make_decision(pickup_date, days, [10, 12, 14])
             expiry_plans, expiry_blocked = updater.build_band_plans(
                 make_recommendations([decision]), [expiry_band], expiry_config["rate_zones"], expiry_config
@@ -765,13 +763,31 @@ def check_disabled_bands_and_post_policy_rates() -> None:
     for pickup_date in ("2026-10-26", "2026-10-31", "2035-01-01"):
         competitor = competitor_for_net(Decimal("0.0029"), Decimal("1.1"))
         decision = make_decision(pickup_date, 2, [competitor], broker=1.1)
-        assert decision["minimum_supplier_gross_pln_day"] == 0
-        assert decision["minimum_net_rate_eur_day"] == 0
+        assert decision["minimum_supplier_gross_pln_day"] == 40
+        assert decision["minimum_net_rate_eur_day"] > 0
         plans, blocked = updater.build_band_plans(
             make_recommendations([decision]), [band], post_config["rate_zones"], post_config
         )
-        assert not blocked
-        assert plans[(pickup_date, "J", "WAR")]["target_net_rate"] == 0.002
+        assert not plans and len(blocked) == 1
+        assert "floor blocks top3" in blocked[0]["reason"].lower()
+
+    all_zones_config = production_config()
+    for pickup_date in ("2026-10-25", "2026-10-26", "2035-01-01"):
+        decisions = [
+            make_decision(pickup_date, days, [10, 12, 14], location=zone["location"], zone=zone)
+            for zone in all_zones_config["rate_zones"] for days in range(2, 15)
+        ]
+        payload = make_recommendations(decisions, [zone["location"] for zone in all_zones_config["rate_zones"]])
+        plans, blocked = updater.build_band_plans(
+            payload, all_zones_config["duration_bands"], all_zones_config["rate_zones"], all_zones_config
+        )
+        assert not blocked and len(plans) == 7 * 3
+        for (_, column, _), plan in plans.items():
+            before_increase = pickup_date == "2026-10-25" and column == "J"
+            assert plan["target_net_rate"] == (7.021 if before_increase else 8.499)
+            for check in plan["checks"]:
+                assert check["minimum_supplier_gross_pln_day"] == (30 if before_increase else 40)
+                assert check["supplier_gross_pln_day"] >= check["minimum_supplier_gross_pln_day"]
 
 
 def check_long_rental_floor_and_class_safety() -> None:
