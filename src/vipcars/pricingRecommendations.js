@@ -17,7 +17,8 @@ const DEFAULT_MINIMUM_RATES = {
   end_date: "2026-10-25",
   bands: [
     { min_days: 2, max_days: 6, min_pln_gross_day: 30 },
-    { min_days: 7, max_days: 8, min_pln_gross_day: 40 }
+    { min_days: 7, max_days: 8, min_pln_gross_day: 40 },
+    { min_days: 9, max_days: null, min_pln_gross_day: 40, end_date: null }
   ]
 };
 
@@ -188,19 +189,23 @@ function normalizeMinimumRates(rawMinimumRates) {
   }
   const bands = source.bands.map((band) => ({
     min_days: Number(band?.min_days),
-    max_days: Number(band?.max_days),
-    min_pln_gross_day: Number(band?.min_pln_gross_day)
+    max_days: band?.max_days === null ? null : Number(band?.max_days),
+    min_pln_gross_day: Number(band?.min_pln_gross_day),
+    end_date: Object.hasOwn(band, "end_date") ? band.end_date : endDate
   }));
   for (const band of bands) {
     if (
       !Number.isInteger(band.min_days)
-      || !Number.isInteger(band.max_days)
+      || (band.max_days !== null && !Number.isInteger(band.max_days))
       || band.min_days < 1
-      || band.max_days < band.min_days
+      || (band.max_days !== null && band.max_days < band.min_days)
       || !Number.isFinite(band.min_pln_gross_day)
       || band.min_pln_gross_day < 0
     ) {
       throw new Error("Minimum-rate duration bands must contain valid days and non-negative PLN rates.");
+    }
+    if (band.end_date !== null && !isValidIsoDate(band.end_date)) {
+      throw new Error("Minimum-rate band end_date must be a valid date or null for a permanent floor.");
     }
   }
   return { end_date: endDate, bands };
@@ -304,10 +309,11 @@ function normalizeSettings(options) {
 
 function minimumFloor(check, settings) {
   const days = Number(check.duration_days);
-  const active = String(check.pickup_date) <= settings.minimumRates.end_date;
-  const band = active
-    ? settings.minimumRates.bands.find((item) => days >= item.min_days && days <= item.max_days)
-    : null;
+  const band = settings.minimumRates.bands.find((item) => (
+    days >= item.min_days
+    && (item.max_days === null || days <= item.max_days)
+    && (item.end_date === null || String(check.pickup_date) <= item.end_date)
+  ));
   const supplierGrossPln = band?.min_pln_gross_day ?? 0;
   const netRate = supplierGrossPln
     ? new Decimal(supplierGrossPln)

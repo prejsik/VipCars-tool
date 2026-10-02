@@ -36,13 +36,14 @@
     "end_date": "2026-10-25",
     "bands": [
       { "min_days": 2, "max_days": 6, "min_pln_gross_day": 30 },
-      { "min_days": 7, "max_days": 8, "min_pln_gross_day": 40 }
+      { "min_days": 7, "max_days": 8, "min_pln_gross_day": 40 },
+      { "min_days": 9, "max_days": null, "min_pln_gross_day": 40, "end_date": null }
     ]
   },
   "duration_bands": [
     { "column": "I", "label": "1", "min_days": 1, "max_days": 1, "update_enabled": false },
     { "column": "J", "label": "2-6", "min_days": 2, "max_days": 6 },
     { "column": "K", "label": "7-8", "min_days": 7, "max_days": 8 },
-    { "column": "L", "label": "9+", "min_days": 9, "max_days": 14, "update_enabled": false }
+    { "column": "L", "label": "9+", "min_days": 9, "max_days": 14 }
   ]
 }

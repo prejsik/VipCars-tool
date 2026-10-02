@@ -11,18 +11,19 @@ async function main() {
   const root = path.resolve(__dirname, "..");
   const workflow = fs.readFileSync(path.join(root, ".github/workflows/vipcars-daily.yml"), "utf8");
   const chunks = Number(workflow.match(/SCHEDULE_CHUNK_COUNT: "(\d+)"/)[1]);
-  assert.equal(chunks, 60, "A daily job must contain only one of the 60 pickup dates, not two");
+  const rollingDays = Number(workflow.match(/SCHEDULE_PICKUP_ROLLING_DAYS: "(\d+)"/)[1]);
+  assert.equal(chunks, rollingDays, "Each daily job must contain exactly one scheduled pickup date");
   assert.match(workflow, /max-parallel: 20/);
   const allDates = [];
   for (let chunk = 1; chunk <= chunks; chunk++) {
     const config = loadConfig(["--config", path.join(root, "vipcars.config.example.json"),
-      "--pickup-rolling-days", "60", "--pickup-chunk-index", String(chunk), "--pickup-chunk-total", String(chunks)]);
+      "--pickup-rolling-days", String(rollingDays), "--pickup-chunk-index", String(chunk), "--pickup-chunk-total", String(chunks)]);
     assert.equal(config.pickupDateOptions.length, 1);
     assert.equal(config.durationDays.length * config.locations.length, 91);
     allDates.push(...config.pickupDateOptions);
   }
-  assert.equal(new Set(allDates).size, 60);
-  console.log("PASS daily chunks preserve all 5460 checks with 91 checks per job");
+  assert.equal(new Set(allDates).size, rollingDays);
+  console.log(`PASS daily chunks preserve all ${rollingDays * 91} checks with 91 checks per job`);
 
   const pinnedArgs = ["--config", path.join(root, "vipcars.config.example.json"),
     "--pickup-dates", "2026-01-01,2026-01-02", "--pickup-chunk-total", "2", "--pickup-chunk-index", "2"];

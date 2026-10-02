@@ -190,6 +190,14 @@ function testRankSelectionAndFloors() {
   const sevenDays = buildCase({ competitorRates: [14, 15, 16], durationDays: 7 }).decisions[0];
   assert.equal(sevenDays.minimum_supplier_gross_pln_day, 40);
   assert.equal(sevenDays.minimum_net_rate_eur_day, 8.130081300813009);
+  for (const durationDays of [7, 8]) {
+    for (const pickupDate of ["2026-10-25", "2026-10-26"]) {
+      const decision = buildCase({ competitorRates: [11, 13, 15], durationDays, pickupDate }).decisions[0];
+      const expired = pickupDate === "2026-10-26";
+      assert.equal(decision.minimum_supplier_gross_pln_day, expired ? 0 : 40);
+      assert.equal(decision.target_rank, expired ? 1 : 2);
+    }
+  }
 
   const roundingBoundary = buildCase({ competitorRates: [9.5005004, 9.501, 10] }).decisions[0];
   assert.equal(roundingBoundary.target_candidates[0].net_rate_eur_day, 6.0979);
@@ -264,6 +272,29 @@ function testContractAndRawCalculations() {
     effective_date: null,
     reason: "not_provided"
   });
+}
+
+function testPermanentLongRentalFloor() {
+  const config = JSON.parse(fs.readFileSync(path.join(__dirname, "../vipcars-rate-update.config.json"), "utf8"));
+  for (const options of [{}, { minimumRates: config.minimum_rates }]) {
+    for (const pickupDate of ["2026-10-25", "2026-10-26", "2035-01-01"]) {
+      for (const durationDays of [9, 14, 21, 30]) {
+        const decision = buildCase({
+          competitorRates: [11, 13, 15], pickupDate, durationDays, options
+        }).decisions[0];
+        assert.equal(decision.minimum_supplier_gross_pln_day, 40);
+        assert.equal(decision.minimum_net_rate_eur_day, 8.130081300813009);
+        assert.equal(decision.target_rank, 2);
+        assert.equal(decision.site_target_net_rate_eur_day, 8.468);
+        assert.ok(decision.site_target_net_rate_eur_day * 1.23 * 4 >= 40);
+      }
+    }
+    const blocked = buildCase({
+      competitorRates: [7, 8, 9], pickupDate: "2026-10-26", durationDays: 9, options
+    }).decisions[0];
+    assert.equal(blocked.action, "hold");
+    assert.equal(blocked.data_quality_status, "floor_blocks_top3");
+  }
 }
 
 function testDataQualityGuards() {
@@ -481,6 +512,7 @@ async function testLoadOptionsAndCli(tempDir) {
 async function main() {
   await testExchangeRate();
   testRankSelectionAndFloors();
+  testPermanentLongRentalFloor();
   testContractAndRawCalculations();
   testDataQualityGuards();
 

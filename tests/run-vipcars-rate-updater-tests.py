@@ -81,6 +81,8 @@ def single_zone_config(*, bands: list[dict] | None = None, groups: list[str] | N
 
 
 def floor_pln(pickup_date: str, rental_days: int) -> Decimal:
+    if rental_days >= 9:
+        return Decimal(40)
     if date.fromisoformat(pickup_date) > date(2026, 10, 25):
         return Decimal(0)
     if 2 <= rental_days <= 6:
@@ -257,13 +259,14 @@ def check_production_contract_and_baseline() -> None:
         "bands": [
             {"min_days": 2, "max_days": 6, "min_pln_gross_day": 30},
             {"min_days": 7, "max_days": 8, "min_pln_gross_day": 40},
+            {"min_days": 9, "max_days": None, "min_pln_gross_day": 40, "end_date": None},
         ],
     }
     assert config["duration_bands"] == [
         {"column": "I", "label": "1", "min_days": 1, "max_days": 1, "update_enabled": False},
         {"column": "J", "label": "2-6", "min_days": 2, "max_days": 6},
         {"column": "K", "label": "7-8", "min_days": 7, "max_days": 8},
-        {"column": "L", "label": "9+", "min_days": 9, "max_days": 14, "update_enabled": False},
+        {"column": "L", "label": "9+", "min_days": 9, "max_days": 14},
     ]
 
     workbook = load_workbook(BASELINE_PATH, read_only=True, data_only=False)
@@ -737,12 +740,25 @@ def check_disabled_bands_and_post_policy_rates() -> None:
     updater = load_updater()
     config = single_zone_config()
     disabled_decisions = [make_decision("2026-10-01", 1, [10, 20, 30])]
-    disabled_decisions.extend(make_decision("2026-10-01", days, [10, 20, 30]) for days in range(9, 15))
     plans, blocked = updater.build_band_plans(
         make_recommendations(disabled_decisions), config["duration_bands"], config["rate_zones"], config
     )
     assert not plans
-    assert {item["duration_band"] for item in blocked} == {"1", "9+"}
+    assert {item["duration_band"] for item in blocked} == {"1"}
+
+    for days in (7, 8):
+        expiry_band = {"column": "K", "label": str(days), "min_days": days, "max_days": days}
+        expiry_config = single_zone_config(bands=[expiry_band])
+        for pickup_date, expected_minimum, expected_rank in (
+                ("2026-10-25", 40, 2), ("2026-10-26", 0, 1)):
+            decision = make_decision(pickup_date, days, [10, 12, 14])
+            expiry_plans, expiry_blocked = updater.build_band_plans(
+                make_recommendations([decision]), [expiry_band], expiry_config["rate_zones"], expiry_config
+            )
+            assert not expiry_blocked
+            check = expiry_plans[(pickup_date, "K", "WAR")]["checks"][0]
+            assert check["minimum_supplier_gross_pln_day"] == expected_minimum
+            assert check["target_rank"] == expected_rank
 
     band = {"column": "J", "label": "2", "min_days": 2, "max_days": 2}
     post_config = single_zone_config(bands=[band], groups=["CFAR"])
@@ -756,6 +772,70 @@ def check_disabled_bands_and_post_policy_rates() -> None:
         )
         assert not blocked
         assert plans[(pickup_date, "J", "WAR")]["target_net_rate"] == 0.002
+
+
+def check_long_rental_floor_and_class_safety() -> None:
+    updater = load_updater()
+    config = production_config()
+    for pickup_date in ("2026-10-25", "2026-10-26", "2035-01-01"):
+        decisions = [
+            make_decision(pickup_date, days, [10, 12, 14], broker=1.1,
+                          location=zone["location"], zone=zone)
+            for zone in config["rate_zones"] for days in range(9, 15)
+        ]
+        payload = make_recommendations(decisions, [zone["location"] for zone in config["rate_zones"]])
+        plans, blocked = updater.build_band_plans(payload, config["duration_bands"], config["rate_zones"], config)
+        assert not blocked
+        assert len(plans) == 7
+        rows = [
+            [group, 0, 0, date.fromisoformat(pickup_date).strftime("%d/%m/%Y"),
+             date.fromisoformat(pickup_date).strftime("%d/%m/%Y"), zone["code"], None, None, 100, 90, 80, 70]
+            for zone in config["rate_zones"] for group in PRODUCTION_GROUPS + FROZEN_GROUPS
+        ]
+        sheet = sheet_with_rows(rows)
+        updater.validate_plan_targets(sheet, plans, config)
+        changes = updater.apply_plans(sheet, plans, config)
+        assert len(changes) == 12 * 7
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            assert row[8:11] == (100, 90, 80)
+            assert row[11] == (8.499 if row[0] in PRODUCTION_GROUPS else 70)
+            if row[0] in PRODUCTION_GROUPS:
+                assert Decimal(str(row[11])) * FX * VAT_MULTIPLIER >= 40
+
+        missing = deepcopy(payload)
+        missing["decisions"].pop()
+        partial, blocked = updater.build_band_plans(missing, config["duration_bands"], config["rate_zones"], config)
+        assert len(partial) == 6 and len(blocked) == 1
+        assert "14d missing" in blocked[0]["reason"]
+
+        below_floor = deepcopy(payload)
+        below_floor["decisions"][0]["competitor_rates_eur_day"] = [
+            {"provider": "Low competitor", "rate_eur_day": 1}
+        ]
+        partial, blocked = updater.build_band_plans(
+            below_floor, config["duration_bands"], config["rate_zones"], config
+        )
+        assert len(partial) == 6 and len(blocked) == 1
+        assert "floor blocks top3" in blocked[0]["reason"].lower()
+
+    for days in (9, 14, 21, 30):
+        target = updater.duration_target(make_decision("2035-01-01", days, [10, 12, 14]), config,
+                                         updater.validate_pricing_context(payload, config))
+        assert target["floor_pln"] == 40
+        assert target["target_rank"] == 2
+
+    for extra_group in ("PFAR", "IDAR", "UNKNOWN"):
+        tampered = deepcopy(config)
+        tampered["apply_groups"].append(extra_group)
+        untouched = sheet_with_rows(rows)
+        before = list(untouched.values)
+        expect_value_error(lambda: updater.apply_plans(untouched, plans, tampered), "unapproved rate groups")
+        assert list(untouched.values) == before
+        expect_value_error(lambda: updater.validate_plan_targets(untouched, plans, tampered), "unapproved rate groups")
+        expect_value_error(
+            lambda: updater.build_band_plans(payload, tampered["duration_bands"], tampered["rate_zones"], tampered),
+            "unapproved rate groups",
+        )
 
 
 def check_fail_closed_payloads() -> None:
@@ -931,7 +1011,7 @@ def check_js_payload(payload: dict) -> None:
     expected_target = 157.35 / expected_broker / 1.23
     for decision in payload["decisions"]:
         days = decision["rental_days"]
-        expected_floor = 30 if days <= 6 else 40 if days <= 8 else 0
+        expected_floor = 30 if days <= 6 else 40
         assert decision["currency"] == "EUR"
         assert decision["coverage_status"] == "complete"
         assert decision["data_quality_status"] == "ok"
@@ -1013,9 +1093,9 @@ def check_production_end_to_end() -> None:
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         assert summary["source_workbook_sha256"] == baseline_hash
         assert summary["expanded_source_row_count"] == 16842
-        assert summary["change_count"] == 12 * 7 * 2 == 168
-        assert summary["blocked_band_count"] == 7
-        assert {item["duration_band"] for item in summary["blocked_bands"]} == {"9+"}
+        assert summary["change_count"] == 12 * 7 * 3 == 252
+        assert summary["blocked_band_count"] == 0
+        assert summary["verified_duration_count"] == 7 * 13
 
         imported = load_workbook(import_path, read_only=False, data_only=False)
         assert imported.sheetnames == ["RateGroup Export"]
@@ -1032,7 +1112,7 @@ def check_production_end_to_end() -> None:
                 approved = (
                     day.isoformat() == "2026-10-01"
                     and expected[0] in PRODUCTION_GROUPS
-                    and index in (9, 10)
+                    and index in (9, 10, 11)
                 )
                 if approved:
                     assert actual_value == 118.308, (expected[0], expected[5], index)
@@ -1045,7 +1125,7 @@ def check_production_end_to_end() -> None:
                     )
                 assert not (isinstance(actual_value, str) and actual_value.startswith("="))
         assert next(actual_rows, None) is None
-        assert approved_positions == 168
+        assert approved_positions == 252
         assert all(cell.comment is None for row in import_sheet for cell in row)
 
         report = load_workbook(report_path, read_only=False, data_only=False)
@@ -1064,7 +1144,7 @@ def check_production_end_to_end() -> None:
         changed_headers = [cell.value for cell in changed_sheet[1]]
         changed_index = {name: index for index, name in enumerate(changed_headers)}
         changed_rows = list(changed_sheet.iter_rows(min_row=2, values_only=True))
-        assert len(changed_rows) == 168
+        assert len(changed_rows) == 252
         assert {row[changed_index["Updated net EUR/day"]] for row in changed_rows} == {118.308}
         assert all(
             row[changed_index["Original net EUR/day"]] != row[changed_index["Updated net EUR/day"]]
@@ -1075,7 +1155,7 @@ def check_production_end_to_end() -> None:
             cell.coordinate for row in report_sheet.iter_rows() for cell in row if cell.comment is not None
         }
         assert annotated_cells == changed_cells
-        assert len(changed_cells) == 168
+        assert len(changed_cells) == 252
         for address in changed_cells:
             assert report_sheet[address].comment.author == "VipCars scraper"
             assert report_sheet[address].fill.fgColor.rgb == "00FFF2CC"
@@ -1112,6 +1192,7 @@ def main() -> None:
     check_rank_fallbacks_and_quantized_floor()
     check_full_band_blocking()
     check_disabled_bands_and_post_policy_rates()
+    check_long_rental_floor_and_class_safety()
     check_fail_closed_payloads()
     check_missing_locations_and_classes()
     check_production_end_to_end()

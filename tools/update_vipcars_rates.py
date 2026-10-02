@@ -26,6 +26,10 @@ BASE_HEADERS = [
 CHANGE_FILL = PatternFill(fill_type="solid", fgColor="FFF2CC")
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="D9EAF7")
 CONFIRMED_BASELINE_STATUSES = {"confirmed_imported", "verified_live"}
+APPROVED_RATE_GROUPS = frozenset({
+    "CDMR", "CFAR", "CFAR1", "CFAR2", "CFMR", "CWAR",
+    "CWAR1", "CWAR2", "CWAR3", "CWMR", "EDAR", "EDMR",
+})
 
 
 def parse_args() -> argparse.Namespace:
@@ -277,7 +281,21 @@ def decimal_number(value: Any, name: str, *, positive: bool = False) -> Decimal:
     return number
 
 
+def approved_apply_groups(config: dict[str, Any]) -> frozenset[str]:
+    groups = config.get("apply_groups")
+    if not isinstance(groups, list) or not groups or any(not isinstance(group, str) for group in groups):
+        raise ValueError("apply_groups must be a non-empty list of approved rate groups.")
+    selected = frozenset(groups)
+    unapproved = selected - APPROVED_RATE_GROUPS
+    if unapproved:
+        raise ValueError(f"Unapproved rate groups: {', '.join(sorted(unapproved))}.")
+    if len(selected) != len(groups):
+        raise ValueError("apply_groups contains duplicate rate groups.")
+    return selected
+
+
 def validate_pricing_context(recommendations, config):
+    approved_apply_groups(config)
     if recommendations.get("pricing_model") != "absolute_net_v1":
         raise ValueError("Recommendations must use the absolute_net_v1 pricing model; regenerate legacy recommendations.")
     if recommendations.get("transmission") != "automatic" or recommendations.get("vehicle_category"):
@@ -322,10 +340,14 @@ def duration_target(decision, config, context):
         raise ValueError("Broker multiplier is outside the allowed range.")
     floor_settings = config["minimum_rates"]
     floor_pln = Decimal(0)
-    if parse_date(decision["pickup_date"]) <= parse_date(floor_settings["end_date"]):
-        for band in floor_settings["bands"]:
-            if int(band["min_days"]) <= int(decision["rental_days"]) <= int(band["max_days"]):
-                floor_pln = max(floor_pln, decimal_number(band["min_pln_gross_day"], "minimum gross PLN"))
+    for band in floor_settings["bands"]:
+        end_date = band.get("end_date", floor_settings["end_date"])
+        max_days = band["max_days"]
+        days = int(decision["rental_days"])
+        if (days >= int(band["min_days"])
+                and (max_days is None or days <= int(max_days))
+                and (end_date is None or parse_date(decision["pickup_date"]) <= parse_date(end_date))):
+            floor_pln = max(floor_pln, decimal_number(band["min_pln_gross_day"], "minimum gross PLN"))
     if floor_pln < 0:
         raise ValueError("Minimum gross PLN must not be negative.")
     floor_net = floor_pln / (fx * vat_multiplier)
@@ -488,7 +510,7 @@ def build_band_plans(
 
 
 def apply_plans(worksheet, plans, config: dict[str, Any]) -> list[dict[str, Any]]:
-    groups = set(config.get("apply_groups", []))
+    groups = approved_apply_groups(config)
     changes: list[dict[str, Any]] = []
     plans_by_scope: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
     for (pickup_date, column, zone_code), plan in plans.items():
@@ -534,7 +556,7 @@ def apply_plans(worksheet, plans, config: dict[str, Any]) -> list[dict[str, Any]
 
 
 def validate_plan_targets(worksheet, plans, config: dict[str, Any]) -> None:
-    groups = set(config.get("apply_groups", []))
+    groups = approved_apply_groups(config)
     available: set[tuple[str, str, str, str]] = set()
     columns_by_scope: dict[tuple[str, str], set[str]] = {}
     for pickup_date, column, zone_code in plans:
@@ -703,6 +725,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     source_bytes = workbook_path.read_bytes()
     source_hash = verify_baseline(source_bytes, config_path, config)
+    approved_apply_groups(config)
     recommendations = load_json(recommendations_path)
     bands = config.get("duration_bands", [])
     if not bands:
