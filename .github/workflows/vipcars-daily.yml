@@ -32,7 +32,7 @@ on:
       pickup_rolling_days:
         description: "Number of consecutive pickup dates from today"
         required: false
-        default: "60"
+        default: "45"
       durations:
         description: "Comma-separated rental durations in days"
         required: true
@@ -59,7 +59,7 @@ env:
   TZ: Europe/Warsaw
   SCHEDULE_LOCATIONS: "Bydgoszcz,Warsaw,Krakow,Gdansk,Katowice,Wroclaw,Poznan"
   SCHEDULE_PICKUP_WEEKDAYS: ""
-  SCHEDULE_PICKUP_ROLLING_DAYS: "60"
+  SCHEDULE_PICKUP_ROLLING_DAYS: "45"
   SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10,11,12,13,14"
   SCHEDULE_CURRENCY: "EUR"
   SCHEDULE_TRANSMISSION: "automatic"
@@ -69,7 +69,7 @@ env:
   PUSH_TEST_DURATIONS: "2"
   PUSH_TEST_CURRENCY: "EUR"
   PUSH_TEST_TRANSMISSION: "automatic"
-  SCHEDULE_CHUNK_COUNT: "60"
+  SCHEDULE_CHUNK_COUNT: "45"
 
 jobs:
   prepare:
