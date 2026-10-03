@@ -69,7 +69,6 @@ env:
   PUSH_TEST_DURATIONS: "2"
   PUSH_TEST_CURRENCY: "EUR"
   PUSH_TEST_TRANSMISSION: "automatic"
-  SCHEDULE_CHUNK_COUNT: "45"
 
 jobs:
   prepare:
@@ -111,7 +110,6 @@ jobs:
             default_durations="$PUSH_TEST_DURATIONS"
             default_currency="$PUSH_TEST_CURRENCY"
             default_transmission="$PUSH_TEST_TRANSMISSION"
-            chunk_total="1"
           else
             default_locations="$SCHEDULE_LOCATIONS"
             default_pickup_weekdays="$SCHEDULE_PICKUP_WEEKDAYS"
@@ -119,7 +117,6 @@ jobs:
             default_durations="$SCHEDULE_DURATIONS"
             default_currency="$SCHEDULE_CURRENCY"
             default_transmission="$SCHEDULE_TRANSMISSION"
-            chunk_total="${SCHEDULE_CHUNK_COUNT:-3}"
           fi
 
           locations="${INPUT_LOCATIONS:-$default_locations}"
@@ -148,18 +145,12 @@ jobs:
           IFS=',' read -ra planned_dates <<< "$pickup_dates"
           pickup_count="${#planned_dates[@]}"
 
-          if ! [[ "$chunk_total" =~ ^[0-9]+$ ]] || [[ "$chunk_total" -lt 1 ]]; then
-            chunk_total="1"
-          fi
-
-          if ! [[ "$pickup_rolling_days" =~ ^[0-9]+$ ]] || [[ "$pickup_rolling_days" -lt 1 ]]; then
-            chunk_total="1"
-          elif [[ "$pickup_rolling_days" -lt "$chunk_total" ]]; then
-            chunk_total="$pickup_rolling_days"
-          fi
-
-          chunk_values="$(seq -s, 1 "$chunk_total")"
-          chunk_matrix="{\"chunk\":[${chunk_values}]}"
+          chunk_matrix="$(node src/vipcars/pickupPlan.js --matrix \
+            --config vipcars.config.example.json \
+            --locations "$locations" \
+            --durations-days "$durations" \
+            --pickup-dates "$pickup_dates")"
+          chunk_total="$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).include.length))' -- "$chunk_matrix")"
 
           echo "locations=$locations" >> "$GITHUB_OUTPUT"
           echo "pickup_weekdays=$pickup_weekdays" >> "$GITHUB_OUTPUT"
@@ -214,7 +205,7 @@ jobs:
     timeout-minutes: 180
     strategy:
       fail-fast: false
-      max-parallel: 20
+      max-parallel: 12
       matrix: ${{ fromJson(needs.prepare.outputs.chunk_matrix) }}
 
     steps:
@@ -238,13 +229,13 @@ jobs:
           LOCATIONS: ${{ needs.prepare.outputs.locations }}
           PICKUP_WEEKDAYS: ${{ needs.prepare.outputs.pickup_weekdays }}
           PICKUP_ROLLING_DAYS: ${{ needs.prepare.outputs.pickup_rolling_days }}
-          DURATIONS: ${{ needs.prepare.outputs.durations }}
+          DURATIONS: ${{ matrix.durations }}
           CURRENCY: ${{ needs.prepare.outputs.currency }}
           VEHICLE_CATEGORY: ${{ needs.prepare.outputs.vehicle_category }}
           TRANSMISSION: ${{ needs.prepare.outputs.transmission }}
           CHUNK_INDEX: ${{ matrix.chunk }}
           CHUNK_TOTAL: ${{ needs.prepare.outputs.chunk_total }}
-          PICKUP_DATES: ${{ needs.prepare.outputs.pickup_dates }}
+          PICKUP_DATES: ${{ matrix.pickup_dates }}
         run: |
           mkdir -p output
           mkdir -p "artifacts/vipcars/chunk-${CHUNK_INDEX}"
@@ -258,6 +249,7 @@ jobs:
             --transmission "$TRANSMISSION" \
             --pickup-dates "$PICKUP_DATES" \
             --timeout-ms 45000 \
+            --attempt-budget-ms 240000 \
             --artifacts-dir "artifacts/vipcars/chunk-${CHUNK_INDEX}" \
             --output-csv "output/vipcars-results-chunk-${CHUNK_INDEX}.csv" \
             --output-coverage "output/vipcars-coverage-chunk-${CHUNK_INDEX}.csv")
@@ -274,10 +266,6 @@ jobs:
 
           if [[ -n "$VEHICLE_CATEGORY" ]]; then
             command+=(--vehicle-category "$VEHICLE_CATEGORY")
-          fi
-
-          if [[ "$CHUNK_TOTAL" != "1" ]]; then
-            command+=(--pickup-chunk-index "$CHUNK_INDEX" --pickup-chunk-total "$CHUNK_TOTAL")
           fi
 
           "${command[@]}" \
@@ -402,6 +390,10 @@ jobs:
             vipcars-recommendations.xlsx \
             vipcars-rates-import-ready.xlsx \
             vipcars-rate-update-summary.json; do
+            if [[ "$optional_file" == "vipcars-rates-import-ready.xlsx" ]] && \
+               ! node src/vipcars/telegramAlert.js --import-ready output/vipcars-rate-update-summary.json; then
+              continue
+            fi
             if [[ -f "output/$optional_file" ]]; then
               cp "output/$optional_file" "public/$optional_file"
             fi

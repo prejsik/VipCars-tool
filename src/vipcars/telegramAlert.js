@@ -22,22 +22,70 @@ function buildRunStatus(coverageRows, scrapeResult = "success") {
     + `bledy: ${errors.length} (timeout: ${timeouts}); niedokonczone: ${pending}; GitHub: ${scrapeResult}`;
 }
 
-function buildWorkbookSection({ baselineStatus, workbookStatus, reportExists, importExists, pageUrl } = {}) {
+function validateRateUpdateSummary(summary) {
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return "brak poprawnego podsumowania vipcars-rate-update-summary.json";
+  }
+  const counts = [summary.verified_duration_count, summary.blocked_band_count, summary.change_count];
+  if (!counts.every((count) => Number.isSafeInteger(count) && count >= 0)) {
+    return "podsumowanie vipcars-rate-update-summary.json zawiera nieprawidlowe liczniki";
+  }
+  return "";
+}
+
+function importReadyFromFile(summaryPath) {
+  try {
+    const summary = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
+    return !validateRateUpdateSummary(summary) && summary.verified_duration_count > 0;
+  } catch {
+    return false;
+  }
+}
+
+function buildWorkbookSection({ baselineStatus, workbookStatus, reportExists, importExists, pageUrl,
+  summary, summaryError } = {}) {
   if (!["confirmed_imported", "verified_live"].includes(baselineStatus)) {
     return "Pliki stawek XLSX: zablokowane. Brak potwierdzenia aktualnosci pliku bazowego w Wheels; import nie zostal wygenerowany.";
   }
+  const summaryIssue = summaryError || validateRateUpdateSummary(summary);
   if (workbookStatus !== "success" || !reportExists || !importExists || !pageUrl) {
-    return "Pliki stawek XLSX: nie powstaly kompletne pliki. Blad generowania lub walidacji; szczegoly w GitHub Actions.";
+    return `Pliki stawek XLSX: nie powstaly kompletne pliki. Blad generowania lub walidacji; szczegoly w GitHub Actions. Import XLSX ukryty: ${summaryIssue || "pliki wyjsciowe sa niekompletne"}.`;
   }
   const base = `${String(pageUrl).replace(/\/+$/, "")}/`;
-  return `Rekomendacje XLSX:\n${base}vipcars-recommendations.xlsx\n\nImport XLSX:\n${base}vipcars-rates-import-ready.xlsx`;
+  const recommendation = `Rekomendacje XLSX:\n${base}vipcars-recommendations.xlsx`;
+  if (summaryIssue) {
+    return `${recommendation}\n\nImport XLSX ukryty: ${summaryIssue}.`;
+  }
+
+  const { verified_duration_count: verified, blocked_band_count: blocked, change_count: changes } = summary;
+  const metrics = `Zweryfikowane okresy: ${verified}; zablokowane pasma cenowe: ${blocked}; zmiany cen: ${changes}.`;
+  if (verified === 0) {
+    return `${metrics}\n${recommendation}\n\nBrak zweryfikowanych pasm cenowych. Plik importu zawiera wyłącznie bazę i nie stanowi nowej rekomendacji; import nie jest udostępniany.`;
+  }
+
+  const status = blocked > 0 ? "czesciowy" : "zweryfikowany";
+  const warning = blocked > 0 ? "\nOstrzeżenie: baza pozostała dla zablokowanych zakresów." : "";
+  return `${status}; ${metrics}\n${recommendation}\n\nImport XLSX:\n${base}vipcars-rates-import-ready.xlsx${warning}`;
 }
 
 function buildWorkbookSectionFromFiles(manifestPath, workbookStatus, pageUrl, outputDir = "output") {
   let baselineStatus;
   try { baselineStatus = JSON.parse(fs.readFileSync(manifestPath, "utf8")).status; }
   catch { baselineStatus = undefined; }
-  return buildWorkbookSection({ baselineStatus, workbookStatus, pageUrl,
+  let summary;
+  let summaryError = "";
+  const summaryPath = path.join(outputDir, "vipcars-rate-update-summary.json");
+  try {
+    summary = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
+    summaryError = validateRateUpdateSummary(summary);
+  } catch (error) {
+    summaryError = error.code === "ENOENT"
+      ? "brak pliku vipcars-rate-update-summary.json"
+      : error instanceof SyntaxError
+        ? "nieprawidlowy JSON w vipcars-rate-update-summary.json"
+        : `nie mozna odczytac vipcars-rate-update-summary.json: ${error.message}`;
+  }
+  return buildWorkbookSection({ baselineStatus, workbookStatus, pageUrl, summary, summaryError,
     reportExists: fs.existsSync(path.join(outputDir, "vipcars-recommendations.xlsx")),
     importExists: fs.existsSync(path.join(outputDir, "vipcars-rates-import-ready.xlsx")) });
 }
@@ -105,7 +153,9 @@ function buildAlertFromFiles(csvPath, coveragePath) {
 }
 
 if (require.main === module) {
-  if (process.argv[2] === "--workbooks") {
+  if (process.argv[2] === "--import-ready") {
+    process.exitCode = importReadyFromFile(process.argv[3]) ? 0 : 1;
+  } else if (process.argv[2] === "--workbooks") {
     process.stdout.write(`${buildWorkbookSectionFromFiles(process.argv[3], process.argv[4], process.argv[5], process.argv[6])}\n`);
   } else if (process.argv[2] === "--status") {
     const coveragePath = process.argv[3];
@@ -125,6 +175,7 @@ module.exports = {
   buildRunStatus,
   buildWorkbookSection,
   buildWorkbookSectionFromFiles,
+  importReadyFromFile,
   buildAlertFromFiles,
   buildMissingMmStartDateAlert,
   classifyStartDatesWithoutMm

@@ -6,24 +6,33 @@ const { loadConfig, normalizeTransmission, printHelp } = require("../src/vipcars
 const { parseCsv } = require("../src/vipcars/reportHtml");
 const { VipCarsScraper } = require("../src/vipcars/scraper");
 const { buildRunStatus } = require("../src/vipcars/telegramAlert");
+const { scrapeMatrix } = require("../src/vipcars/pickupPlan");
 
 async function main() {
   const root = path.resolve(__dirname, "..");
   const workflow = fs.readFileSync(path.join(root, ".github/workflows/vipcars-daily.yml"), "utf8");
-  const chunks = Number(workflow.match(/SCHEDULE_CHUNK_COUNT: "(\d+)"/)[1]);
   const rollingDays = Number(workflow.match(/SCHEDULE_PICKUP_ROLLING_DAYS: "(\d+)"/)[1]);
-  assert.equal(chunks, rollingDays, "Each daily job must contain exactly one scheduled pickup date");
-  assert.match(workflow, /max-parallel: 20/);
-  const allDates = [];
-  for (let chunk = 1; chunk <= chunks; chunk++) {
+  assert.match(workflow, /max-parallel: 12/);
+  assert.match(workflow, /--attempt-budget-ms 240000/);
+  assert.match(workflow, /DURATIONS: \$\{\{ matrix\.durations \}\}/);
+  assert.match(workflow, /PICKUP_DATES: \$\{\{ matrix\.pickup_dates \}\}/);
+  assert.doesNotMatch(workflow, /--pickup-chunk-index/);
+  const matrix = scrapeMatrix(["--config", path.join(root, "vipcars.config.example.json"),
+    "--pickup-rolling-days", String(rollingDays)]);
+  const checks = new Set();
+  for (const chunk of matrix.include) {
     const config = loadConfig(["--config", path.join(root, "vipcars.config.example.json"),
-      "--pickup-rolling-days", String(rollingDays), "--pickup-chunk-index", String(chunk), "--pickup-chunk-total", String(chunks)]);
+      "--pickup-dates", chunk.pickup_dates, "--durations-days", chunk.durations]);
     assert.equal(config.pickupDateOptions.length, 1);
-    assert.equal(config.durationDays.length * config.locations.length, 91);
-    allDates.push(...config.pickupDateOptions);
+    assert.ok(config.durationDays.length * config.locations.length <= 42);
+    for (const duration of config.durationDays) for (const location of config.locations) {
+      const key = [config.pickupDateOptions[0], duration, location].join("|");
+      assert.equal(checks.has(key), false);
+      checks.add(key);
+    }
   }
-  assert.equal(new Set(allDates).size, rollingDays);
-  console.log(`PASS daily chunks preserve all ${rollingDays * 91} checks with 91 checks per job`);
+  assert.equal(checks.size, rollingDays * 91);
+  console.log(`PASS import-band chunks preserve all ${rollingDays * 91} checks with at most 42 checks per job`);
 
   const pinnedArgs = ["--config", path.join(root, "vipcars.config.example.json"),
     "--pickup-dates", "2026-01-01,2026-01-02", "--pickup-chunk-total", "2", "--pickup-chunk-index", "2"];

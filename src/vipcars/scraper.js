@@ -217,7 +217,7 @@ class VipCarsScraper {
       const waitOptions = { timeoutMs: attemptBudgetMs, deadlineAt,
         onState: diagnostics.recordResultState };
       const searchOutcome = await diagnostics.measure("search", () => bounded(this.waitForSearchOutcome(page, {
-        ...waitOptions, timeoutMs: this.config.timeoutMs || 45000
+        ...waitOptions, timeoutMs: Math.max(this.config.timeoutMs || 45000, attemptBudgetMs / 2)
       })));
       await diagnostics.measure("search_contract", () => bounded(validatePageSearch(page, this.buildSearchUrl(location))));
       if (searchOutcome === "no-results") {
