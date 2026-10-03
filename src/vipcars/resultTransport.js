@@ -11,17 +11,23 @@ function transportError(message, retryable = false) {
   return error;
 }
 
-function parseResultRequest(value, { includeFiltered = false } = {}) {
+function parseResultRequest(value, { includeFiltered = false, includeBootstrap = false } = {}) {
   try {
     const url = new URL(value);
     if (`${url.origin}${url.pathname}` !== ENDPOINT) return null;
     let query = url.search.slice(1);
-    if (query.startsWith("%22")) query = decodeURIComponent(query);
+    if (query.startsWith("%22") && query.endsWith("%22")) {
+      // Chromium escapes the wrapper quotes, while an encoded envelope also escapes the query separators.
+      query = query.includes("=") ? `"${query.slice(3, -3)}"` : decodeURIComponent(query);
+    }
     const quoted = query.startsWith('"');
     if (quoted) query = JSON.parse(query);
     const params = new URLSearchParams(query);
     const loadType = params.get("load_type");
-    if (loadType !== "get_result_desktop" && !(includeFiltered && loadType === "get_result_desktop_filter")) return null;
+    const supported = loadType === "get_result_desktop"
+      || (includeFiltered && loadType === "get_result_desktop_filter")
+      || (includeBootstrap && loadType === "sub_step1");
+    if (!supported) return null;
     return { params, quoted, url: url.href };
   } catch {
     return null;
@@ -51,7 +57,7 @@ function observeResultFailures(page, onFailure) {
     }
   };
   const isResult = (request) => ["xhr", "fetch"].includes(request.resourceType())
-    && parseResultRequest(request.url(), { includeFiltered: true });
+    && parseResultRequest(request.url(), { includeFiltered: true, includeBootstrap: true });
   const context = page.context?.();
 
   if (!context || typeof context.newCDPSession !== "function") {
@@ -176,7 +182,7 @@ function observeResultFailures(page, onFailure) {
   const requestWillBeSent = ({ requestId, request }) => {
     const state = stateFor(requestId);
     state.isResult = request.method === "GET"
-      && Boolean(parseResultRequest(request.url, { includeFiltered: true }));
+      && Boolean(parseResultRequest(request.url, { includeFiltered: true, includeBootstrap: true }));
     if (state.isResult) {
       let url;
       try {
@@ -322,15 +328,41 @@ function validateResultRequest(source, expectedUrl) {
 function requestUrl(source, offset, page) {
   // The endpoint embeds an encoded query inside JSON; preserve opaque session values byte-for-byte.
   let url = source.url;
-  if (isImplicitFilteredFirstPage(source) && !source.quoted) {
-    return `${url}&offset=${offset}&car_page=${page}`;
-  }
   for (const [key, value] of [["offset", offset], ["car_page", page]]) {
     const pattern = new RegExp(`([?&]${key}=)\\d+(?=&|%22|$)`, "g");
     if ([...url.matchAll(pattern)].length !== 1) throw transportError("Ambiguous result request cursor.");
     url = url.replace(pattern, (match, prefix) => `${prefix}${value}`);
   }
   return url;
+}
+
+async function preparePaginationSource(page, source) {
+  if (!isImplicitFilteredFirstPage(source)) return source;
+  const native = await page.evaluate(() => {
+    if (typeof window.create_filter_data_ajax !== "function" || typeof window.SITE_URL !== "string"
+        || typeof window.affiliate_cookie_data !== "string") return null;
+    return { endpoint: `${window.SITE_URL}/node.php`, filters: window.create_filter_data_ajax(),
+      affiliate: window.affiliate_cookie_data };
+  });
+  if (!native || native.endpoint !== ENDPOINT || typeof native.filters !== "string") {
+    throw transportError("Native filtered pagination parameters are unavailable.");
+  }
+  // Filter clicks use jQuery's plain query; filter_search uses a JSON-wrapped continuation query.
+  const query = `&load_type=get_result_desktop_filter&offset=0&car_page=0&${native.filters}`
+    + `&affiliate_cookie_data=${native.affiliate}`;
+  const next = parseResultRequest(new URL(`${ENDPOINT}?${JSON.stringify(query)}`).href, { includeFiltered: true });
+  if (!next) throw transportError("Invalid native filtered pagination request.");
+  const cursorFields = new Set(["offset", "car_page", "_", "affiliate_cookie_data"]);
+  const fields = new Set([...source.params.keys(), ...next.params.keys()]);
+  for (const field of fields) {
+    if (!cursorFields.has(field)
+        && JSON.stringify(source.params.getAll(field)) !== JSON.stringify(next.params.getAll(field))) {
+      throw transportError("Native pagination changes the active search or filters.");
+    }
+  }
+  next.headers = { ...source.headers, accept: "*/*", "cache-control": "no-cache",
+    "content-type": "application/json; charset=utf-8" };
+  return next;
 }
 
 function captureInitialResults(page, { filtered = false } = {}) {
@@ -440,4 +472,4 @@ async function collectResultPages({ initial, source, deadlineAt, fetchPage, onSt
 
 module.exports = { parseResultRequest, validateResultRequest, captureInitialResults,
   compareVisibleCards, collectResultPages, transportError, requestUrl, fetchResultPage, allowPaginationRequest,
-  observeResultFailures };
+  observeResultFailures, preparePaginationSource };

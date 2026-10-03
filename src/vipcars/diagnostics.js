@@ -1,3 +1,5 @@
+const { parseResultRequest } = require("./resultTransport");
+
 function safeUrl(value) {
   try {
     const url = new URL(value);
@@ -33,7 +35,20 @@ function createAttemptDiagnostics(metadata) {
     if (!/(^|\.)(vipcars|supplycars)\.com$/i.test(url.hostname)) return null;
     const type = request.resourceType();
     if (!["document", "script", "xhr", "fetch"].includes(type)) return null;
-    return { url: safeUrl(url.href), resource_type: type };
+    const record = { url: safeUrl(url.href), resource_type: type };
+    const result = parseResultRequest(url.href, { includeFiltered: true, includeBootstrap: true });
+    if (result) {
+      record.result_type = result.params.get("load_type");
+      for (const key of ["offset", "car_page"]) {
+        const value = result.params.get(key);
+        if (/^\d+$/.test(value || "")) record[key] = Number(value);
+      }
+      const timing = request.timing?.();
+      if (timing?.requestStart >= 0 && timing.responseStart >= timing.requestStart) {
+        record.response_wait_ms = Math.round(timing.responseStart - timing.requestStart);
+      }
+    }
+    return record;
   };
   return {
     recordResultState(state) {

@@ -116,6 +116,9 @@ async function main() {
   ], { offset: 3, page: 2, total: 3 });
   const unexpectedRequests = [];
   const paginationRequests = [];
+  const bootstrapUrl = new URL(`https://be.supplycars.com/be1/node.php?${JSON.stringify("&load_type=sub_step1&currency=EUR")}`).href;
+  let failBootstrap = false;
+  let failedBootstraps = 0;
 
   const browserAdapter = {
     async newContext(options) {
@@ -132,7 +135,13 @@ async function main() {
               abort: (...args) => route.abort(...args),
               continue: async () => {
                 if (requestUrl === SEARCH_URL) {
-                  await route.fulfill({ status: 200, contentType: "text/html", body: bootstrapPage(initialUrl) });
+                  await route.fulfill({ status: 200, contentType: "text/html",
+                    body: bootstrapPage(failBootstrap ? bootstrapUrl : initialUrl) });
+                  return;
+                }
+                if (failBootstrap && requestUrl === bootstrapUrl) {
+                  failedBootstraps += 1;
+                  await route.abort("failed");
                   return;
                 }
                 const parsed = parseResultRequest(requestUrl);
@@ -208,6 +217,17 @@ async function main() {
     assert.deepEqual(outcome.results.map((offer) => offer.pay_now_currency), ["EUR", "EUR"]);
     assert.equal(outcome.results.some((offer) => offer.provider === "Manual Rival"), false);
     console.log("PASS offline Chromium network capture, pagination, contract and local filtering");
+    failBootstrap = true;
+    const bootstrapFailure = await scraper.runSingleLocation(browserAdapter, "Warsaw", {
+      attempt: 2, cooldown: { until: 0 }
+    });
+    assert.equal(bootstrapFailure.ok, false);
+    assert.equal(bootstrapFailure.error.code, "RESULT_TRANSPORT_INVALID",
+      "a failed bootstrap must end the attempt without becoming a search timeout");
+    assert.equal(failedBootstraps, 1);
+    assert.equal(paginationRequests.length, 1, "bootstrap failure must not attempt result pagination");
+    assert.deepEqual(unexpectedRequests, []);
+    console.log("PASS offline Chromium detects failed search bootstrap before search timeout");
   } finally {
     await browser.close();
     fs.rmSync(artifactsDir, { recursive: true, force: true });

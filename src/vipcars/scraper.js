@@ -160,7 +160,7 @@ class VipCarsScraper {
       await bounded(this.configureCurrency(context));
       await bounded(context.route("**/*", async (route) => {
         const type = route.request().resourceType();
-        const resultRequest = transport.parseResultRequest(route.request().url(), { includeFiltered: true });
+        const resultRequest = transport.parseResultRequest(route.request().url(), { includeFiltered: true, includeBootstrap: true });
         if (this.config.networkResults && resultRequest && resultRequest.params.has("offset") && resultRequest.params.get("offset") !== "0") {
           if (!transport.allowPaginationRequest(route.request(), allowedResultUrls)) {
             await route.abort("aborted").catch(() => {});
@@ -374,13 +374,15 @@ class VipCarsScraper {
       if (!visibleCounts.length || visibleCounts.some((value) => !/^\d+$/.test(value) || Number(value) !== initial.totalCount)) {
         throw transport.transportError("Result response and visible DOM total counts differ.");
       }
-      const cards = await transport.collectResultPages({ initial, source: captured.source,
+      const paginationSource = initial.cards.length < initial.totalCount
+        ? await transport.preparePaginationSource(page, captured.source) : captured.source;
+      const cards = await transport.collectResultPages({ initial, source: paginationSource,
         deadlineAt: options.deadlineAt, onState: options.onState,
         fetchPage: async (url, timeout) => {
           try {
             options.allowedResultUrls.add(url);
             const response = await options.resultFailures.correlate(url, () =>
-              transport.fetchResultPage(page, url, timeout, captured.source.headers));
+              transport.fetchResultPage(page, url, timeout, paginationSource.headers));
             if (response.status !== 200) {
               throw transport.transportError(`Result page HTTP ${response.status}.`, response.status >= 500);
             }

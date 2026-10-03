@@ -31,6 +31,13 @@ function bootstrap(initialUrl, filteredUrl, empty) {
     <input id="price_range" value="${new URL(filteredUrl).searchParams.get("price_range")}" data-slider-min="0" data-slider-max="1000">
     <input id="filter_automatic" type="checkbox"><span id="car_count_data">4</span><div id="results"></div>
     <script>
+      window.SITE_URL = 'https://be.supplycars.com/be1';
+      window.affiliate_cookie_data = 'fixture-affiliate';
+      window.create_filter_data_ajax = () => {
+        const params = new URL(${JSON.stringify(filteredUrl)}).searchParams;
+        params.delete('load_type');
+        return params.toString();
+      };
       const show = async (url, total) => {
         document.getElementById('page_busy').value = '1';
         const response = await fetch(url);
@@ -38,7 +45,7 @@ function bootstrap(initialUrl, filteredUrl, empty) {
         document.getElementById('car_count_data').textContent = total;
         document.getElementById('page_busy').value = '0';
       };
-      document.getElementById('filter_automatic').addEventListener('change', () => show(${JSON.stringify(filteredUrl)}, ${empty ? 0 : 3}));
+      document.getElementById('filter_automatic').addEventListener('change', () => show(${JSON.stringify(filteredUrl)}, ${empty ? 0 : 4}));
       show(${JSON.stringify(initialUrl)}, 4);
     </script>`;
 }
@@ -69,6 +76,7 @@ async function runCase(browser, scenario) {
   params.delete("offset"); params.delete("car_page");
   const filteredUrl = `https://be.supplycars.com/be1/node.php?${params}`;
   let filteredRequests = 0;
+  let nonNativePagination = 0;
   let unfilteredPagination = 0;
   let livePage;
   const observations = [];
@@ -77,7 +85,7 @@ async function runCase(browser, scenario) {
     assert.equal(await page.locator(".scv-car-box").count(), empty ? 0 : 2,
       "subsequent result pages must not grow the live DOM");
     assert.equal(await page.evaluate(() => window.unwantedPaginationScript), undefined);
-    if (!empty) assert.equal(raw.length, 3);
+    if (!empty) assert.equal(raw.length, 4);
     return originalExtract(page, location, raw);
   };
   const adapter = { async newContext(options) {
@@ -102,12 +110,24 @@ async function runCase(browser, scenario) {
             html = pageHtml([card("u1", "Manual Rival", 10, false), card("u2", "MM Cars Rental", 40)], 2, 1, 4);
           } else {
             filteredRequests++;
+            if (source.params.has("offset")) {
+              const headers = route.request().headers();
+              if (!source.quoted || source.params.get("affiliate_cookie_data") !== "fixture-affiliate"
+                  || headers["content-type"] !== "application/json; charset=utf-8"
+                  || headers["cache-control"] !== "no-cache") {
+                nonNativePagination++;
+                return route.fulfill({ status: 400, headers: { "access-control-allow-origin": "*" },
+                  body: "Pagination must use the site's continuation request." });
+              }
+            }
             observations.push({ offset: source.params.get("offset"), key: source.params.get("key") });
             html = empty
               ? '<div class="notFoundImg"><img alt="No Results Found" width="200" height="200"></div>'
               : !source.params.has("offset")
-                ? pageHtml([card("a1", "Competitor A", 30), card("a2", "MM Cars Rental", 40)], 2, 1, 3)
-                : pageHtml([card("a3", "MM Cars Rental", 25, scenario !== "mixed-page")], 3, 2, 3);
+                ? pageHtml([card("a1", "Competitor A", 30), card("a2", "MM Cars Rental", 40)], 2, 1, 4)
+                : source.params.get("offset") === "2"
+                  ? pageHtml([card("a3", "Competitor B", 35, scenario !== "mixed-page")], 3, 2, 4)
+                  : pageHtml([card("a4", "MM Cars Rental", 25)], 4, 3, 4);
           }
           return route.fulfill({ status: 200, contentType: "text/html",
             headers: { "access-control-allow-origin": "*" }, body: html });
@@ -117,6 +137,7 @@ async function runCase(browser, scenario) {
   } };
   try {
     const result = await scraper.runSingleLocation(adapter, "Warsaw");
+    assert.equal(nonNativePagination, 0, "filtered pagination must match the native filter_search request");
     assert.equal(unfilteredPagination, 0, "automatic mode must paginate the filtered search");
     if (wrongFilter || narrowPrice || scenario === "mixed-page") {
       assert.equal(result.ok, false);
@@ -129,15 +150,15 @@ async function runCase(browser, scenario) {
         assert.deepEqual(result.results, []);
         assert.equal(filteredRequests, 1);
       } else {
-        assert.equal(filteredRequests, 2);
-        assert.deepEqual(observations.map((item) => item.offset), [null, "2"]);
+        assert.equal(filteredRequests, 3);
+        assert.deepEqual(observations.map((item) => item.offset), [null, "2", "3"]);
         assert.ok(observations.every((item) => item.key === "opaque-test-session"));
         assert.equal(result.cheapest.provider, "MM Cars Rental");
         assert.equal(result.cheapest.total_price, 25);
         assert.equal(result.cheapest.price_per_day, 12.5);
         assert.equal(result.cheapest.pay_now_amount, 2.5);
         assert.equal(result.cheapest.currency, "EUR");
-        assert.equal(result.results.length, 2);
+        assert.equal(result.results.length, 3);
       }
     }
     assert.equal(livePage.isClosed(), true);

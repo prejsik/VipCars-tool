@@ -115,34 +115,37 @@ async function main() {
     assert.equal(contexts, 0);
     assert.equal(outcome.error.code, "SERVER_COOLDOWN");
   }]);
-  cases.push(["network mode also records a CORS-hidden server cooldown", async () => {
-    const page = new EventEmitter();
-    const cdp = new EventEmitter();
-    cdp.send = async () => {};
-    cdp.detach = async () => cdp.removeAllListeners();
-    page.context = () => ({ newCDPSession: async () => cdp });
-    page.setDefaultTimeout = () => {};
-    page.setDefaultNavigationTimeout = () => {};
-    page.goto = () => new Promise(() => {
-      const url = "https://be.supplycars.com/be1/node.php?load_type=get_result_desktop&offset=0&car_page=0";
-      cdp.emit("Network.requestWillBeSent", { requestId: "initial", request: { url, method: "GET" } });
-      cdp.emit("Network.responseReceivedExtraInfo", { requestId: "initial", statusCode: 400,
-        headers: { "Retry-After": "3600" } });
-    });
-    const context = { addCookies: async () => {}, route: async () => {},
-      newPage: async () => page, close: async () => {} };
-    const shared = { until: 0 };
-    const scraper = new VipCarsScraper({ ...config, baseUrl: "https://www.vipcars.com",
-      networkResults: true, attemptBudgetMs: 150 });
-    scraper.captureFailureArtifacts = async () => {};
-    const start = Date.now();
-    const outcome = await scraper.runSingleLocation({ newContext: async () => context }, "Warsaw", { cooldown: shared });
-    assert.equal(outcome.error.code, "SERVER_COOLDOWN");
-    assert.ok(shared.until >= start + 3600000);
-  }]);
+  for (const loadType of ["get_result_desktop", "sub_step1"]) {
+    cases.push([`network mode records a CORS-hidden cooldown for ${loadType}`, async () => {
+      const page = new EventEmitter();
+      const cdp = new EventEmitter();
+      cdp.send = async () => {};
+      cdp.detach = async () => cdp.removeAllListeners();
+      page.context = () => ({ newCDPSession: async () => cdp });
+      page.setDefaultTimeout = () => {};
+      page.setDefaultNavigationTimeout = () => {};
+      page.goto = () => new Promise(() => {
+        const url = `https://be.supplycars.com/be1/node.php?load_type=${loadType}&offset=0&car_page=0`;
+        cdp.emit("Network.requestWillBeSent", { requestId: "initial", request: { url, method: "GET" } });
+        cdp.emit("Network.responseReceivedExtraInfo", { requestId: "initial", statusCode: 400,
+          headers: { "Retry-After": "3600" } });
+      });
+      const context = { addCookies: async () => {}, route: async () => {},
+        newPage: async () => page, close: async () => {} };
+      const shared = { until: 0 };
+      const scraper = new VipCarsScraper({ ...config, baseUrl: "https://www.vipcars.com",
+        networkResults: true, attemptBudgetMs: 150 });
+      scraper.captureFailureArtifacts = async () => {};
+      const start = Date.now();
+      const outcome = await scraper.runSingleLocation({ newContext: async () => context }, "Warsaw", { cooldown: shared });
+      assert.equal(outcome.error.code, "SERVER_COOLDOWN");
+      assert.ok(shared.until >= start + 3600000);
+    }]);
+  }
   cases.push(["failed result requests end a stuck search without consuming its full deadline", async () => {
     for (const [loadType, status, retryable] of [
       ["get_result_desktop_filter", null, true], ["get_result_desktop", 503, true],
+      ["sub_step1", null, true], ["sub_step1", 503, true],
       ["get_result_desktop_filter", 429, true], ["get_result_desktop_filter", 403, false]
     ]) {
       const page = new EventEmitter();
@@ -273,6 +276,34 @@ async function main() {
     assert.equal(snapshot.result_state.cardCount, 4);
     assert.equal(snapshot.result_state.totalCount, 8);
     assert.doesNotMatch(JSON.stringify(snapshot), /private-cookie/);
+  }]);
+  cases.push(["diagnostics show pagination cursor and response wait without session values", async () => {
+    const page = new EventEmitter();
+    const diagnostics = createAttemptDiagnostics({ attempt: 1 });
+    diagnostics.attach(page);
+    const request = {
+      url: () => 'https://be.supplycars.com/be1/node.php?load_type=get_result_desktop_filter&offset=20&car_page=3&key=private-session',
+      resourceType: () => 'fetch',
+      timing: () => ({ requestStart: 10, responseStart: 30010, responseEnd: -1 })
+    };
+    page.emit('response', { request: () => request, status: () => 200 });
+    const snapshot = diagnostics.snapshot();
+    assert.equal(snapshot.requests[0].offset, 20);
+    assert.equal(snapshot.requests[0].car_page, 3);
+    assert.equal(snapshot.requests[0].response_wait_ms, 30000);
+    assert.equal(snapshot.requests[0].result_type, 'get_result_desktop_filter');
+    assert.doesNotMatch(JSON.stringify(snapshot), /private-session|key=/);
+    page.emit("requestfailed", {
+      url: () => "https://be.supplycars.com/be1/node.php?load_type=sub_step1&key=private-bootstrap",
+      resourceType: () => "xhr",
+      failure: () => ({ errorText: "net::ERR_FAILED" })
+    });
+    const bootstrapRecord = diagnostics.snapshot().requests[1];
+    assert.equal(bootstrapRecord.result_type, "sub_step1");
+    assert.equal(bootstrapRecord.error, "net::ERR_FAILED");
+    assert.doesNotMatch(JSON.stringify(bootstrapRecord), /private-bootstrap|key=/);
+    diagnostics.detach();
+    assert.equal(page.listenerCount('response'), 0);
   }]);
   cases.push(["diagnostics redact Cookie and Set-Cookie header values", async () => {
     assert.doesNotMatch(sanitizeMessage("Cookie: sessionid=private-cookie; extra=private-extra\nSet-Cookie: auth=private-auth"), /private-/);

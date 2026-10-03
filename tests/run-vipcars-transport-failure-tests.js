@@ -56,6 +56,25 @@ async function assertPending(promise, message) {
 }
 
 async function main() {
+  for (const status of [200, 400]) {
+    const { page, cdp } = cdpHarness();
+    const failures = [];
+    const observer = observeResultFailures(page, (error) => failures.push(error));
+    await observer.ready;
+    const url = new URL(`https://be.supplycars.com/be1/node.php?${JSON.stringify("&load_type=sub_step1&pickup_date=2026-10-05&currency=EUR&key=private-bootstrap")}`).href;
+    cdp.emit("Network.requestWillBeSent", requestEvent("bootstrap", url));
+    cdp.emit("Network.loadingFailed", loadingFailedEvent("bootstrap", {
+      corsErrorStatus: { corsError: "MissingAllowOriginHeader" }
+    }));
+    assert.equal(failures.length, 0, "bootstrap CORS failures must wait for wire headers too");
+    cdp.emit("Network.responseReceivedExtraInfo", extraInfoEvent("bootstrap", status,
+      status === 400 ? { "Retry-After": "3600" } : {}));
+    assert.equal(failures.length, 1, "a failed bootstrap must not wait for the search timeout");
+    assert.equal(failures[0].code, status === 400 ? "SERVER_COOLDOWN" : "RESULT_TRANSPORT_INVALID");
+    assert.doesNotMatch(failures[0].message, /private-bootstrap|pickup_date/);
+    await observer.detach();
+  }
+
   {
     const { page, cdp, detachCount } = cdpHarness();
     const failures = [];

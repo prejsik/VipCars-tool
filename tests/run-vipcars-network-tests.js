@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const { loadConfig } = require("../src/vipcars/config");
-const { parseResultRequest, validateResultRequest, collectResultPages, compareVisibleCards, requestUrl, fetchResultPage, allowPaginationRequest, captureInitialResults } = require("../src/vipcars/resultTransport");
+const { parseResultRequest, validateResultRequest, collectResultPages, compareVisibleCards, requestUrl, fetchResultPage, allowPaginationRequest, captureInitialResults, preparePaginationSource } = require("../src/vipcars/resultTransport");
 
 const expected = new URL("https://www.vipcars.com/search/?pickup_country=119&pickup_city=1744&pickup_location=10921&dropoff_country=119&dropoff_city=1744&dropoff_location=10921&pickup_date=2026-09-28&dropoff_date=2026-09-30&pickup_time=10%3A00&dropoff_time=10%3A00&currency=EUR&driver_age=30");
 const params = new URLSearchParams(expected.search);
@@ -41,6 +41,21 @@ function mockResponse(requestUrl, html, headers = {}, status = 200) {
 }
 
 async function main() {
+  const opaqueParams = new URLSearchParams(params);
+  opaqueParams.set("key", "private&nested=one%2Btwo+three/four=");
+  const opaqueUrl = new URL(`https://be.supplycars.com/be1/node.php?${JSON.stringify(`&${opaqueParams}`)}`).href;
+  assert.equal(parseResultRequest(opaqueUrl).params.get("key"), opaqueParams.get("key"),
+    "decoding the JSON wrapper must not decode nested query values twice");
+  const encodedEnvelopeUrl = `https://be.supplycars.com/be1/node.php?${encodeURIComponent(JSON.stringify(`&${opaqueParams}`))}`;
+  assert.equal(parseResultRequest(encodedEnvelopeUrl).params.get("key"), opaqueParams.get("key"),
+    "a fully encoded envelope must retain its inner query encoding");
+  const bootstrapUrl = resultUrl("sub_step1");
+  assert.equal(parseResultRequest(bootstrapUrl, { includeFiltered: true }), null,
+    "bootstrap HTML must not be captured as an offer page");
+  assert.equal(parseResultRequest(bootstrapUrl, { includeBootstrap: true }).params.get("load_type"), "sub_step1");
+  assert.equal(parseResultRequest(resultUrl("sub_step2"), { includeBootstrap: true }), null,
+    "booking steps are outside search failure observation");
+
   const configArgs = ["--config", "vipcars.config.example.json"];
   assert.equal(loadConfig(configArgs).networkResults, false);
   assert.equal(loadConfig([...configArgs, "--network-results"]).networkResults, true);
@@ -49,6 +64,8 @@ async function main() {
   const response = (method, status) => ({ url: () => url, status: () => status, text: async () => "fixture",
     request: () => ({ method: () => method, postData: () => null, headers: () => ({}) }) });
   page.emit("response", response("OPTIONS", 204));
+  assert.equal(await captured.read(), undefined);
+  page.emit("response", mockResponse(bootstrapUrl, "bootstrap-without-offers"));
   assert.equal(await captured.read(), undefined);
   page.emit("response", response("GET", 400));
   await assert.rejects(captured.read(), (error) => error.retryable === false);
@@ -99,9 +116,30 @@ async function main() {
   assert.equal(implicitFilteredResult.source.params.has("offset"), false);
   assert.equal(implicitFilteredResult.source.params.has("car_page"), false);
   assert.doesNotThrow(() => validateResultRequest(implicitFilteredResult.source, expected.href));
-  const implicitNextUrl = requestUrl(implicitFilteredResult.source, 10, 1);
-  assert.equal(implicitNextUrl, `${implicitFilteredUrl}&offset=10&car_page=1`);
+  assert.throws(() => requestUrl(implicitFilteredResult.source, 10, 1), /cursor/);
+  const nativeFilters = new URLSearchParams(parseResultRequest(implicitFilteredUrl, { includeFiltered: true }).params);
+  nativeFilters.delete("load_type");
+  nativeFilters.set("key", opaqueParams.get("key"));
+  const nativeSource = parseResultRequest(`https://be.supplycars.com/be1/node.php?load_type=get_result_desktop_filter&${nativeFilters}&_=123`, { includeFiltered: true });
+  const nativeData = { endpoint: "https://be.supplycars.com/be1/node.php", filters: nativeFilters.toString(), affiliate: "fixture-affiliate" };
+  const nativePage = { evaluate: async () => nativeData };
+  const paginationSource = await preparePaginationSource(nativePage, nativeSource);
+  const implicitNextUrl = requestUrl(paginationSource, 10, 1);
+  assert.equal(paginationSource.quoted, true);
+  assert.equal(paginationSource.params.get("key"), opaqueParams.get("key"));
+  assert.equal(paginationSource.params.has("_"), false);
+  assert.equal(paginationSource.params.get("affiliate_cookie_data"), "fixture-affiliate");
+  assert.equal(paginationSource.headers["content-type"], "application/json; charset=utf-8");
+  validateResultRequest(paginationSource, expected.href);
   assert.equal(parseResultRequest(implicitNextUrl, { includeFiltered: true }).params.get("offset"), "10");
+  assert.equal(await preparePaginationSource({ evaluate: () => { throw new Error("must not read page"); } }, paginationSource), paginationSource);
+  await assert.rejects(preparePaginationSource({ evaluate: async () => null }, nativeSource), /unavailable/);
+  await assert.rejects(preparePaginationSource({ evaluate: async () => ({ ...nativeData, endpoint: "https://other.example/node.php" }) }, nativeSource), /unavailable/);
+  for (const [field, value] of [["currency", "USD"], ["pickup_date", "2027-01-01"], ["specs_checks", "manual"], ["supplier_checks", "only-one"]]) {
+    const changedFilters = new URLSearchParams(nativeFilters);
+    changedFilters.set(field, value);
+    await assert.rejects(preparePaginationSource({ evaluate: async () => ({ ...nativeData, filters: changedFilters.toString() }) }, nativeSource), /changes.*search or filters/);
+  }
   implicitFilteredCapture.detach();
   assert.equal(implicitFilteredPage.listenerCount("response"), 0);
 
