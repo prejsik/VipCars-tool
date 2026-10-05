@@ -250,6 +250,12 @@ def check_production_contract_and_baseline() -> None:
     }
     assert config["rate_precision"] == 3
     assert config["exchange_rate"] == {"fallback_pln_per_eur": 4.3}
+    assert config['protected_baseline_periods'] == [
+        {'start_date': '2026-10-31', 'end_date': '2026-11-01'},
+        {'start_date': '2026-11-11', 'end_date': '2026-11-11'},
+        {'start_date': '2026-12-15', 'end_date': '2027-01-01'},
+    ]
+    assert load_updater().verify_baseline(BASELINE_PATH, CONFIG_PATH, config) == hashlib.sha256(BASELINE_PATH.read_bytes()).hexdigest()
     assert config["minimum_rates"] == {
         "end_date": "2026-10-25",
         "bands": [
@@ -270,14 +276,14 @@ def check_production_contract_and_baseline() -> None:
     workbook = load_workbook(BASELINE_PATH, read_only=True, data_only=False)
     sheet = workbook[config["worksheet"]]
     assert [cell.value for cell in next(sheet.iter_rows(max_row=1))] == HEADERS
-    assert sheet.max_row - 1 == 15880
+    assert sheet.max_row - 1 == 15747
     expanded_count = 0
     for row in sheet.iter_rows(min_row=2, values_only=True):
         start = datetime.strptime(row[3], "%d/%m/%Y").date()
         end = datetime.strptime(row[4], "%d/%m/%Y").date()
         expanded_count += (end - start).days + 1
         assert not any(isinstance(value, str) and value.startswith("=") for value in row)
-    assert expanded_count == 16842
+    assert expanded_count == 15747
     workbook.close()
 
 
@@ -760,7 +766,7 @@ def check_disabled_bands_and_post_policy_rates() -> None:
 
     band = {"column": "J", "label": "2", "min_days": 2, "max_days": 2}
     post_config = single_zone_config(bands=[band], groups=["CFAR"])
-    for pickup_date in ("2026-10-26", "2026-10-31", "2035-01-01"):
+    for pickup_date in ("2026-10-26", "2026-10-30", "2035-01-01"):
         competitor = competitor_for_net(Decimal("0.0029"), Decimal("1.1"))
         decision = make_decision(pickup_date, 2, [competitor], broker=1.1)
         assert decision["minimum_supplier_gross_pln_day"] == 40
@@ -963,8 +969,8 @@ for (const zone of config.rate_zones) {
     const check = {
       location: zone.location,
       duration_days: days,
-      pickup_date: '2026-10-01',
-      dropoff_date: `2026-10-${String(1 + days).padStart(2, '0')}`,
+      pickup_date: '2026-10-07',
+      dropoff_date: `2026-10-${String(7 + days).padStart(2, '0')}`,
       status: 'complete',
       result_count: 2
     };
@@ -1073,7 +1079,7 @@ def check_production_end_to_end() -> None:
         if row[0] in PRODUCTION_GROUPS
     }
     for row in source_rows:
-        if row[0] in PRODUCTION_GROUPS and row[3] == row[4] == "01/10/2026":
+        if row[0] in PRODUCTION_GROUPS and row[3] == row[4] == "07/10/2026":
             target_counts[(row[0], row[5])] += 1
     expected_targets = {(group, zone["code"]) for group in PRODUCTION_GROUPS for zone in config["rate_zones"]}
     assert set(target_counts) == expected_targets
@@ -1108,7 +1114,7 @@ def check_production_end_to_end() -> None:
         assert result.returncode == 0, result.stderr or result.stdout
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         assert summary["source_workbook_sha256"] == baseline_hash
-        assert summary["expanded_source_row_count"] == 16842
+        assert summary["expanded_source_row_count"] == 15747
         assert summary["change_count"] == 12 * 7 * 3 == 252
         assert summary["blocked_band_count"] == 0
         assert summary["verified_duration_count"] == 7 * 13
@@ -1116,17 +1122,17 @@ def check_production_end_to_end() -> None:
         imported = load_workbook(import_path, read_only=False, data_only=False)
         assert imported.sheetnames == ["RateGroup Export"]
         import_sheet = imported["RateGroup Export"]
-        assert import_sheet.max_row - 1 == 16842
+        assert import_sheet.max_row - 1 == 15747
         assert not any(d.hidden for d in import_sheet.row_dimensions.values())
         assert not import_sheet.auto_filter.filterColumn
-        assert import_sheet.auto_filter.ref == "A1:L16843"
+        assert import_sheet.auto_filter.ref == "A1:L15748"
         actual_rows = iter(import_sheet.iter_rows(min_row=2, values_only=True))
         approved_positions = 0
         for day, expected in iter_expected_source_rows(source_rows):
             actual = next(actual_rows)
             for index, (actual_value, expected_value) in enumerate(zip(actual, expected)):
                 approved = (
-                    day.isoformat() == "2026-10-01"
+                    day.isoformat() == "2026-10-07"
                     and expected[0] in PRODUCTION_GROUPS
                     and index in (9, 10, 11)
                 )
@@ -1197,6 +1203,157 @@ def check_production_end_to_end() -> None:
     assert hashlib.sha256(BASELINE_PATH.read_bytes()).hexdigest() == baseline_hash
 
 
+def check_holiday_baseline_minima() -> None:
+    updater = load_updater()
+    config = single_zone_config()
+    config['protected_baseline_periods'] = [
+        {'start_date': '2026-10-31', 'end_date': '2026-11-01'},
+        {'start_date': '2026-11-11', 'end_date': '2026-11-11'},
+        {'start_date': '2026-12-15', 'end_date': '2027-01-01'},
+    ]
+    caps_by_date = {
+        '2026-10-07': [20, 50, 70],
+        '2026-12-24': [20, 50, 70],
+        '2026-12-25': [10, 20, 30],
+        '2026-12-26': [60, 70, 80],
+    }
+    rows, decisions = [], []
+    for pickup, caps in caps_by_date.items():
+        formatted = date.fromisoformat(pickup).strftime('%d/%m/%Y')
+        for group in PRODUCTION_GROUPS + FROZEN_GROUPS:
+            rows.append([group, 0, None, formatted, formatted, 'WAR', None, None, 60, 45, 40, 35])
+        for days in range(2, 15):
+            decisions.append(make_decision(pickup, days, [competitor_for_net(Decimal(n), Decimal('1.1')) for n in caps]))
+    next(item for item in decisions if item['pickup_date'] == '2026-12-25' and item['rental_days'] == 2).pop('vat_rate_percent')
+    with tempfile.TemporaryDirectory(prefix='vipcars-holiday-minima-') as raw_temp:
+        temp = Path(raw_temp)
+        source = temp / 'baseline.xlsx'
+        sheet = sheet_with_rows(rows)
+        sheet.title = 'RateGroup Export'
+        sheet.parent.save(source)
+        manifest = temp / 'manifest.json'
+        manifest.write_text(json.dumps(confirmed_manifest(source)), encoding='utf-8')
+        config['baseline_manifest_file'] = str(manifest)
+        config_path = temp / 'config.json'
+        config_path.write_text(json.dumps(config), encoding='utf-8')
+        payload = temp / 'decisions.json'
+        payload.write_text(json.dumps(make_recommendations(decisions)), encoding='utf-8')
+        source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+        summary = updater.run(Namespace(workbook=str(source), recommendations=str(payload),
+                                         config=str(config_path), report_output=str(temp / 'review.xlsx'),
+                                         import_output=str(temp / 'import.xlsx'), summary_output=None))
+        imported = load_workbook(temp / 'import.xlsx', read_only=True)
+        actual = {(row[0], row[3]): row for row in imported['RateGroup Export'].iter_rows(min_row=2, values_only=True)}
+        imported.close()
+        for group in PRODUCTION_GROUPS:
+            assert actual[group, '07/10/2026'][9] < 45, 'Ordinary dates must still allow decreases.'
+            for pickup in ('24/12/2026', '26/12/2026'):
+                assert all(new >= base for new, base in zip(actual[group, pickup][9:12], (45, 40, 35))), (
+                    'Holiday rates must not fall below the baseline.', group, pickup, actual[group, pickup])
+            assert actual[group, '25/12/2026'][8:12] == (60, 45, 40, 35), 'Infeasible top3 must preserve the baseline.'
+            assert actual[group, '26/12/2026'][9] > 45, 'Holiday minima must not freeze feasible increases.'
+        for row in rows:
+            if row[0] in FROZEN_GROUPS:
+                assert actual[row[0], row[3]] == tuple(row)
+        assert summary['blocked_band_count'] == 3
+        assert all('baseline' in item['reason'].lower() for item in summary['blocked_bands'])
+        report = load_workbook(temp / 'review.xlsx', read_only=True)
+        review = report['Recommendations Review']
+        headers = next(review.iter_rows(max_row=1, values_only=True))
+        report_rows = [dict(zip(headers, row)) for row in review.iter_rows(min_row=2, values_only=True)]
+        report.close()
+        adjusted = next(row for row in report_rows if row['Pickup date'] == '2026-12-24' and row['Duration'] == 2)
+        assert adjusted['Target rank'] == adjusted['Achieved rank'] == 2, 'Report must show the protected final rank.'
+        assert abs(adjusted['Minimum MM gross PLN/day'] - 45 * 1.23 * 4.3) < 1e-9
+        assert '45' in adjusted['Reason'] and 'baseline' in adjusted['Reason'].lower()
+        held = next(row for row in report_rows if row['Pickup date'] == '2026-12-25' and row['Duration'] == 2)
+        assert held['Target rank'] is None and 'baseline' in held['Reason'].lower()
+        assert abs(held['Minimum MM gross PLN/day'] - 45 * 1.23 * 4.3) < 1e-9
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == source_hash
+
+
+def check_holiday_floor_boundaries_and_guard() -> None:
+    updater = load_updater()
+    band = {'column': 'J', 'label': '2', 'min_days': 2, 'max_days': 2}
+    config = single_zone_config(bands=[band])
+    protected = {'2026-10-31', '2026-11-01', '2026-11-11', '2026-12-15', '2027-01-01'}
+    ordinary = {'2026-10-30', '2026-11-02', '2026-11-10', '2026-11-12', '2026-12-14', '2027-01-02'}
+    rows, decisions = [], []
+    for pickup in sorted(protected | ordinary):
+        formatted = date.fromisoformat(pickup).strftime('%d/%m/%Y')
+        for group in PRODUCTION_GROUPS + FROZEN_GROUPS:
+            rate = 45.0004 if group == 'CFAR' else 44 if group in PRODUCTION_GROUPS else 1000
+            rows.append([group, 0, None, formatted, formatted, 'WAR', None, None, 60, rate, 40, 35])
+        decisions.append(make_decision(pickup, 2, [competitor_for_net(n, Decimal('1.1'))
+                                                 for n in (Decimal('45.0004'), Decimal(50), Decimal(70))]))
+    sheet = sheet_with_rows(rows)
+    minimums = updater.protected_baseline_minimums(sheet, [band], config)
+    assert set(minimums) == {(pickup, 'J', 'WAR') for pickup in protected}
+    assert set(minimums.values()) == {Decimal('45.0004')}, 'Only approved classes define the shared floor.'
+    recommendations = make_recommendations(decisions)
+    plans, blocked = updater.build_band_plans(recommendations, [band], config['rate_zones'], config, minimums)
+    assert not blocked
+    for (pickup, _, _), plan in plans.items():
+        check = plan['checks'][0]
+        assert check['target_rank'] == check['achieved_rank'] == (2 if pickup in protected else 1)
+        assert check['minimum_baseline_net_eur_day'] == (45.0004 if pickup in protected else 0)
+        if pickup in protected:
+            assert plan['target_net_rate'] >= 45.001, 'Protected floors must round upward.'
+    updater.apply_plans(sheet, plans, config)
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        if row[0] in PRODUCTION_GROUPS and updater.parse_date(row[3]).isoformat() in protected:
+            assert row[9] >= 45.001
+        if row[0] in FROZEN_GROUPS:
+            assert row[9] == 1000
+    expect_value_error(lambda: updater.build_band_plans(recommendations, [band], config['rate_zones'], config),
+                       'Missing protected baseline minimum')
+    guarded_sheet = sheet_with_rows(rows)
+    unsafe = deepcopy(plans[('2026-12-15', 'J', 'WAR')])
+    unsafe['target_net_rate'] = 20
+    expect_value_error(lambda: updater.apply_plans(guarded_sheet, {('2026-12-15', 'J', 'WAR'): unsafe}, config),
+                       'undercuts protected baseline')
+    bad_config = deepcopy(config)
+    bad_config['protected_baseline_periods'] = [{'start_date': '2026-12-31', 'end_date': '2026-12-15'}]
+    expect_value_error(lambda: updater.protected_baseline_minimums(sheet, [band], bad_config), 'ends before')
+
+
+def check_production_holiday_minima_all_zones() -> None:
+    updater = load_updater()
+    config = production_config()
+    source = BASELINE_PATH.read_bytes()
+    workbook, sheet, _ = updater.prepare_workbook(source, config['worksheet'], config['rate_zones'], config['duration_bands'])
+    before = list(sheet.iter_rows(min_row=2, values_only=True))
+    decisions = [make_decision('2026-12-24', days,
+                              [competitor_for_net(Decimal(n), Decimal('1.1')) for n in (20, 50, 70)],
+                              location=zone['location'], zone=zone)
+                 for zone in config['rate_zones'] for days in range(2, 15)]
+    payload = make_recommendations(decisions, [zone['location'] for zone in config['rate_zones']])
+    minima = updater.protected_baseline_minimums(sheet, config['duration_bands'], config)
+    plans, blocked = updater.build_band_plans(payload, config['duration_bands'], config['rate_zones'], config, minima)
+    assert not blocked and len(plans) == 21
+    observed_ranks = set()
+    for (_, column, zone), plan in plans.items():
+        original_floor = max(Decimal(str(row[{'J': 9, 'K': 10, 'L': 11}[column]])) for row in before
+                             if row[0] in PRODUCTION_GROUPS and row[3] == '24/12/2026' and row[5] == zone)
+        expected_rank = next(rank for rank, cap in enumerate((Decimal(20), Decimal(50), Decimal(70)), 1)
+                             if cap >= quantize_up(original_floor))
+        assert all(check['target_rank'] == check['achieved_rank'] == expected_rank for check in plan['checks'])
+        observed_ranks.add(expected_rank)
+    assert observed_ranks == {2, 3}, 'The real baseline includes different 9+ holiday floors by branch.'
+    updater.validate_plan_targets(sheet, plans, config)
+    changes = updater.apply_plans(sheet, plans, config)
+    assert len(changes) == 252
+    for original, actual in zip(before, sheet.iter_rows(min_row=2, values_only=True)):
+        for index, (old, new) in enumerate(zip(original, actual)):
+            changed_scope = original[0] in PRODUCTION_GROUPS and original[3] == '24/12/2026' and index in (9, 10, 11)
+            if changed_scope:
+                assert new >= old, (original[0], original[5], index, old, new)
+            else:
+                assert new == old
+    workbook.close()
+    assert BASELINE_PATH.read_bytes() == source
+
+
 def main() -> None:
     check_production_contract_and_baseline()
     check_expansion_preserves_formatting()
@@ -1212,6 +1369,9 @@ def main() -> None:
     check_fail_closed_payloads()
     check_missing_locations_and_classes()
     check_production_end_to_end()
+    check_holiday_baseline_minima()
+    check_holiday_floor_boundaries_and_guard()
+    check_production_holiday_minima_all_zones()
     print("All VipCars absolute rate updater tests passed.")
 
 

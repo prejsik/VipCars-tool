@@ -32,6 +32,11 @@
     "max_broker_markup_multiplier": 1.25
   },
   "exchange_rate": { "fallback_pln_per_eur": 4.3 },
+  "protected_baseline_periods": [
+    { "start_date": "2026-10-31", "end_date": "2026-11-01" },
+    { "start_date": "2026-11-11", "end_date": "2026-11-11" },
+    { "start_date": "2026-12-15", "end_date": "2027-01-01" }
+  ],
   "minimum_rates": {
     "end_date": "2026-10-25",
     "bands": [

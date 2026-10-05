@@ -1,21 +1,13 @@
 {
-  "source_filename": "RateGroup Export (3).xlsx",
-  "source_sha256": "cc3cec717a876aad0f13143f7e6d6ec7eb6282795e995194efc56d03bea69bb7",
-  "workbook_sha256": "7a08e393b099a55590204063b27029351fbd88643d0b2893b74fa785d03fc6a3",
-  "excluded_source_rows": [
-    {
-      "row": 13425,
-      "group": "FVMD",
-      "pickup_start": "2026-09-16",
-      "pickup_end": "2027-08-31",
-      "reason": "Missing rate zone; branch cannot be inferred. Removal approved by user."
-    }
-  ],
+  "source_filename": "RateGroup Export (6).xlsx",
+  "source_sha256": "276e50f9c59617dd26567901473d66d2d2e006895a07ee02477f0ffbda69be22",
+  "workbook_sha256": "276e50f9c59617dd26567901473d66d2d2e006895a07ee02477f0ffbda69be22",
+  "excluded_source_rows": [],
   "rate_basis": "net",
   "vat_rate_percent": 23,
   "status": "verified_live",
-  "confirmed_at": "2026-09-28T13:28:48+02:00",
-  "confirmed_by": "User supplied the replacement as the correct current baseline in this conversation.",
+  "confirmed_at": "2026-10-05T11:36:52+02:00",
+  "confirmed_by": "User supplied the new baseline, confirmed its decreases are intentional, and approved deployment in this conversation.",
   "confirmation_method": "User-provided replacement export; not a direct Wheels system inspection.",
   "purpose": "VipCars global rate import baseline"
 }
