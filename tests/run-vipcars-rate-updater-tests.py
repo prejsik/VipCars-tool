@@ -1256,6 +1256,10 @@ def check_holiday_baseline_minima() -> None:
             if row[0] in FROZEN_GROUPS:
                 assert actual[row[0], row[3]] == tuple(row)
         assert summary['blocked_band_count'] == 3
+        assert summary['change_statistics']['increase_count'] == 72
+        assert summary['change_statistics']['decrease_count'] == 36
+        assert summary['change_statistics']['average_increase_net_eur_day'] > 0
+        assert summary['change_statistics']['average_decrease_net_eur_day'] > 0
         assert all('baseline' in item['reason'].lower() for item in summary['blocked_bands'])
         report = load_workbook(temp / 'review.xlsx', read_only=True)
         review = report['Recommendations Review']

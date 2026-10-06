@@ -448,6 +448,7 @@ jobs:
           SCRAPE_RESULT: ${{ needs.scrape.result }}
           CHUNK_TOTAL: ${{ needs.prepare.outputs.chunk_total }}
           LOCATIONS: ${{ needs.prepare.outputs.locations }}
+          PICKUP_DATES: ${{ needs.prepare.outputs.pickup_dates }}
           PICKUP_ROLLING_DAYS: ${{ needs.prepare.outputs.pickup_rolling_days }}
           DURATIONS: ${{ needs.prepare.outputs.durations }}
           CURRENCY: ${{ needs.prepare.outputs.currency }}
@@ -459,18 +460,7 @@ jobs:
             exit 0
           fi
 
-          status_text="$(node src/vipcars/telegramAlert.js --status output/vipcars-coverage.csv "$SCRAPE_RESULT")"
-
-          mm_alert="$(node src/vipcars/telegramAlert.js output/vipcars-results.csv output/vipcars-coverage.csv)"
-          alert_section=""
-          if [[ -n "$mm_alert" ]]; then
-            alert_section=$(printf '\n\n%s' "$mm_alert")
-          fi
-
-          rate_section="$(node src/vipcars/telegramAlert.js --workbooks input/vipcars-baseline-manifest.json "$RATE_WORKBOOK_STATUS" "$PAGE_URL")"
-          rate_section=$(printf '\n\n%s' "$rate_section")
-
-          message=$(printf 'VipCars: raport HTML jest %s.\n\nZakres:\n- chunki: %s\n- lokalizacje: %s\n- rolling days: %s\n- durations: %s\n- waluta: %s%s\n\nRaport HTML:\n%sreport.html%s\n\nArtifact backup:\n%s\n\nGitHub Actions run:\n%s\n' "$status_text" "$CHUNK_TOTAL" "$LOCATIONS" "$PICKUP_ROLLING_DAYS" "$DURATIONS" "$CURRENCY" "$alert_section" "$PAGE_URL" "$rate_section" "$ARTIFACT_URL" "$RUN_URL")
+          message="$(node src/vipcars/telegramAlert.js --message)"
 
           # TELEGRAM_CHAT_IDS can contain one or more comma-separated private chats, groups, or channels.
           IFS=',' read -ra recipients <<< "$chat_ids"

@@ -4,7 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { buildRunStatus, buildWorkbookSection, buildWorkbookSectionFromFiles,
-  importReadyFromFile } = require("../src/vipcars/telegramAlert");
+  importReadyFromFile, buildTelegramMessage } = require("../src/vipcars/telegramAlert");
 
 const status = buildRunStatus([
   { status: "complete" },
@@ -117,10 +117,89 @@ try {
     assert.match(output, /vipcars-rate-update-summary\.json/);
     assert.doesNotMatch(output, /Import XLSX:\s*https:\/\//);
   }
+  fs.mkdirSync(path.join(temp, "input"));
+  fs.writeFileSync(path.join(temp, "input", "vipcars-baseline-manifest.json"), JSON.stringify({ status: "confirmed_imported" }));
+  fs.writeFileSync(summaryPath, JSON.stringify(ready.summary));
+  fs.writeFileSync(path.join(temp, "vipcars-coverage.csv"),
+    "location,pickup_date,duration_days,status,result_count\nWarsaw,2026-10-06,2,complete,20\n");
+  const cliMessage = spawnSync(process.execPath, [path.resolve("src/vipcars/telegramAlert.js"), "--message"], {
+    cwd: temp, encoding: "utf8", env: { ...process.env, OUTPUT_DIR: temp, PAGE_URL: ready.pageUrl,
+      RATE_WORKBOOK_STATUS: "success", SCRAPE_RESULT: "failure", LOCATIONS: "Warsaw,Bydgoszcz",
+      DURATIONS: "2", PICKUP_DATES: "2026-10-06,2026-10-07" }
+  });
+  assert.equal(cliMessage.status, 0, cliMessage.stderr);
+  assert.match(cliMessage.stdout, /1\/4 sprawdzeń \(25%\)/);
+  assert.match(cliMessage.stdout, /niedokonczone: 3/);
+  assert.doesNotMatch(cliMessage.stdout, /100%|Brak MM - pełne dane/);
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 
+assert.equal(typeof buildTelegramMessage, "function", "VipCars needs the DiscoverCars-style message formatter");
+const messageReady = { ...ready, summary: { verified_duration_count: 2, blocked_band_count: 0, change_count: 3,
+  change_statistics: { increase_count: 2, decrease_count: 1,
+    average_increase_net_eur_day: 0.75, average_decrease_net_eur_day: 0.5 } } };
+const messageOptions = {
+  coverageRows: [
+    { pickup_date: "2026-10-06", duration_days: "2", status: "complete", result_count: "20" },
+    { pickup_date: "2026-10-07", duration_days: "3", status: "complete", result_count: "21" }
+  ],
+  rows: [{ pickup_date: "2026-10-06", provider: "MM Cars Rental" },
+    { pickup_date: "2026-10-07", provider: "MM Cars Rental" }],
+  workbooks: messageReady, env: { SCRAPE_RESULT: "success", RUN_URL: "https://example.test/actions/123" }
+};
+const message = buildTelegramMessage(messageOptions);
+assert.match(message, /^VipCars\n\nDaty startu: 06–07\.10\.2026\nCzas trwania: 2–3 dni/);
+assert.match(message, /2\/2 sprawdzeń \(100%\)/);
+assert.match(message, /Zmiany w Excelu: podwyżki 2, obniżki 1/);
+assert.match(message, /0,75 EUR netto\/dobę/);
+assert.match(message, /0,50 EUR netto\/dobę/);
+assert.ok(message.indexOf("Import:") < message.indexOf("Rekomendacje:"));
+assert.ok(message.indexOf("Rekomendacje:") < message.indexOf("Raport cen:"));
+assert.match(message, /Import: https:\/\/example\.test\/VipCars-tool\/vipcars-rates-import-ready\.xlsx/);
+assert.doesNotMatch(message, /chunki:|Artifact backup|rentcars-tool|DiscoverCars/);
+
+const partialMessage = buildTelegramMessage({ ...messageOptions,
+  coverageRows: [...messageOptions.coverageRows,
+    { pickup_date: "2026-10-08", duration_days: "2", status: "incomplete", error: "Search timed out" }],
+  workbooks: { ...messageReady, summary: { ...messageReady.summary, blocked_band_count: 1 } }
+});
+assert.match(partialMessage, /NIEPEŁNY/);
+assert.match(partialMessage, /2\/3 sprawdzeń \(66,67%\)/);
+assert.match(partialMessage, /timeout: 1/);
+assert.match(partialMessage, /Nie można potwierdzić - niepełne dane:[\s\S]*2026-10-08/);
+assert.match(partialMessage, /baza.*zablokowan/is);
+assert.match(partialMessage, /GitHub Actions: https:\/\/example\.test\/actions\/123/);
+assert.doesNotMatch(partialMessage, /100%/);
+const missingChunkMessage = buildTelegramMessage({ ...messageOptions,
+  coverageRows: [{ location: "Warsaw", pickup_date: "2026-10-06", duration_days: "2",
+    status: "complete", result_count: "20" }], rows: [],
+  env: { ...messageOptions.env, LOCATIONS: "Warsaw,Bydgoszcz", DURATIONS: "2,3",
+    PICKUP_DATES: "2026-10-06,2026-10-07", SCRAPE_RESULT: "failure" }
+});
+assert.match(missingChunkMessage, /1\/8 sprawdzeń \(12,5%\)/);
+assert.match(missingChunkMessage, /niedokonczone: 7/);
+assert.match(missingChunkMessage, /Daty startu: 06–07\.10\.2026/);
+assert.match(missingChunkMessage, /Nie można potwierdzić - niepełne dane:[\s\S]*2026-10-06[\s\S]*2026-10-07/);
+assert.doesNotMatch(missingChunkMessage, /100%|Brak MM - pełne dane/);
+const emptyPriceMessage = buildTelegramMessage({ ...messageOptions,
+  coverageRows: [{ pickup_date: "2026-10-06", duration_days: "2", status: "complete", result_count: "0" }], rows: [],
+  workbooks: { ...messageReady, summary: { verified_duration_count: 0, blocked_band_count: 3, change_count: 0 } }
+});
+assert.match(emptyPriceMessage, /0\/1 sprawdzeń \(0%\)/);
+assert.match(emptyPriceMessage, /Brak MM - pełne dane/);
+assert.doesNotMatch(emptyPriceMessage, /Import:\s*https:\/\//);
+for (const overrides of [{ baselineStatus: "user_provided" }, { summary: undefined }, { reportExists: false },
+  { importExists: false }, { workbookStatus: "failure" }, { pageUrl: "" }, { summaryError: "invalid summary" }]) {
+  assert.doesNotMatch(buildTelegramMessage({ ...messageOptions, workbooks: { ...messageReady, ...overrides } }),
+    /Import:\s*https:\/\//, "The new message must preserve every workbook publication gate");
+}
+assert.match(buildTelegramMessage({ ...messageOptions, coverageRows: [] }), /Daty startu: brak danych/);
+const legacyMessage = buildTelegramMessage({ ...messageOptions, workbooks: ready });
+assert.match(legacyMessage, /Zmiany w Excelu: 0 zmian stawek/);
+assert.doesNotMatch(legacyMessage, /Średnia/);
+
 const workflow = fs.readFileSync(".github/workflows/vipcars-daily.yml", "utf8");
-assert.match(workflow, /telegramAlert\.js --workbooks/);
+assert.match(workflow, /telegramAlert\.js --message/);
+assert.match(workflow.split("- name: Notify Telegram")[1], /PICKUP_DATES: \$\{\{ needs\.prepare\.outputs\.pickup_dates \}\}/);
 assert.match(workflow, /! node src\/vipcars\/telegramAlert\.js --import-ready output\/vipcars-rate-update-summary\.json; then\s+continue/);
 assert.doesNotMatch(workflow, /chunk-artifacts\/\*\*/);
 assert.match(workflow, /name: vipcars-results-chunk-/);

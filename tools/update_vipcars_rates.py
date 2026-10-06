@@ -825,10 +825,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     add_report_sheets(workbook, recommendations, changes, blocked, source_hash, expanded_rows, plans, bands)
     workbook.save(report_output)
 
+    deltas = [Decimal(str(change["updated_rate"])) - Decimal(str(change["original_rate"])) for change in changes]
+    increases = [delta for delta in deltas if delta > 0]
+    decreases = [-delta for delta in deltas if delta < 0]
     summary = {
         "source_workbook_sha256": source_hash,
         "expanded_source_row_count": expanded_rows,
         "change_count": len(changes),
+        "change_statistics": {
+            "increase_count": len(increases),
+            "decrease_count": len(decreases),
+            "average_increase_net_eur_day": float(sum(increases) / len(increases)) if increases else None,
+            "average_decrease_net_eur_day": float(sum(decreases) / len(decreases)) if decreases else None,
+        },
         "blocked_band_count": len(blocked),
         "rate_zone_count": len(rate_zones),
         "blocked_bands": blocked,

@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const { parseCsv } = require("./reportHtml");
+const { createCoveragePlan } = require("./coverage");
 
 function isMmCarsProvider(provider) {
   return String(provider || "").trim().toLowerCase().includes("mm cars rental");
@@ -68,7 +69,7 @@ function buildWorkbookSection({ baselineStatus, workbookStatus, reportExists, im
   return `${status}; ${metrics}\n${recommendation}\n\nImport XLSX:\n${base}vipcars-rates-import-ready.xlsx${warning}`;
 }
 
-function buildWorkbookSectionFromFiles(manifestPath, workbookStatus, pageUrl, outputDir = "output") {
+function readWorkbookState(manifestPath, workbookStatus, pageUrl, outputDir = "output") {
   let baselineStatus;
   try { baselineStatus = JSON.parse(fs.readFileSync(manifestPath, "utf8")).status; }
   catch { baselineStatus = undefined; }
@@ -85,9 +86,99 @@ function buildWorkbookSectionFromFiles(manifestPath, workbookStatus, pageUrl, ou
         ? "nieprawidlowy JSON w vipcars-rate-update-summary.json"
         : `nie mozna odczytac vipcars-rate-update-summary.json: ${error.message}`;
   }
-  return buildWorkbookSection({ baselineStatus, workbookStatus, pageUrl, summary, summaryError,
+  return { baselineStatus, workbookStatus, pageUrl, summary, summaryError,
     reportExists: fs.existsSync(path.join(outputDir, "vipcars-recommendations.xlsx")),
-    importExists: fs.existsSync(path.join(outputDir, "vipcars-rates-import-ready.xlsx")) });
+    importExists: fs.existsSync(path.join(outputDir, "vipcars-rates-import-ready.xlsx")) };
+}
+
+function buildWorkbookSectionFromFiles(manifestPath, workbookStatus, pageUrl, outputDir = "output") {
+  return buildWorkbookSection(readWorkbookState(manifestPath, workbookStatus, pageUrl, outputDir));
+}
+
+function buildTelegramMessage({ coverageRows = [], rows = [], workbooks = {}, env = {} } = {}) {
+  const list = (value) => [...new Set(String(value || "").split(",").map((item) => item.trim()).filter(Boolean))];
+  const locations = list(env.LOCATIONS), pickupDateOptions = list(env.PICKUP_DATES), durationDays = list(env.DURATIONS).map(Number);
+  if (locations.length && pickupDateOptions.length && durationDays.length) {
+    const key = (row) => [row.location, row.pickup_date, Number(row.duration_days)].join("|");
+    const recordedChecks = new Map(coverageRows.map((row) => [key(row), row]));
+    // Missing chunk artifacts remain pending checks in the prepared run's full plan.
+    coverageRows = createCoveragePlan({ locations, pickupDateOptions, durationDays })
+      .map((planned) => recordedChecks.get(key(planned)) || planned);
+  }
+  const dateLabel = (date) => date.split("-").reverse().join(".");
+  const dates = [...new Set(coverageRows.map((row) => row.pickup_date).filter((date) =>
+    /^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(date))
+      && new Date(date).toISOString().slice(0, 10) === date))].sort();
+  let startDates = "brak danych";
+  if (dates.length) {
+    const contiguous = dates.every((date, index) => !index || Date.parse(date) - Date.parse(dates[index - 1]) === 86400000);
+    const first = dates[0], last = dates[dates.length - 1];
+    startDates = dates.length === 1 ? dateLabel(first) : contiguous
+      ? `${first.slice(0, 7) === last.slice(0, 7) ? first.slice(8) : dateLabel(first)}–${dateLabel(last)}`
+      : dates.map(dateLabel).join(", ");
+  }
+  const durations = [...new Set((coverageRows.length ? coverageRows.map((row) => row.duration_days)
+    : String(env.DURATIONS || "").split(",")).map(Number).filter((days) => Number.isInteger(days) && days > 0))]
+    .sort((a, b) => a - b);
+  const contiguousDurations = durations.every((days, index) => !index || days === durations[index - 1] + 1);
+  const durationLabel = !durations.length ? "brak danych" : durations.length > 1 && contiguousDurations
+    ? `${durations[0]}–${durations[durations.length - 1]}` : durations.join(", ");
+  const priceChecks = coverageRows.filter((row) => row.status === "complete"
+    && Number.isSafeInteger(Number(row.result_count)) && Number(row.result_count) > 0).length;
+  const percent = coverageRows.length ? new Intl.NumberFormat("pl-PL", { maximumFractionDigits: 2 })
+    .format(priceChecks === coverageRows.length ? 100 : Math.min(99.99, priceChecks / coverageRows.length * 100)) : null;
+  const summaryIssue = workbooks.summaryError || validateRateUpdateSummary(workbooks.summary);
+  const importReady = ["confirmed_imported", "verified_live"].includes(workbooks.baselineStatus)
+    && workbooks.workbookStatus === "success" && workbooks.reportExists && workbooks.importExists
+    && workbooks.pageUrl && !summaryIssue && workbooks.summary.verified_duration_count > 0;
+  const partial = !coverageRows.length || coverageRows.some((row) => row.status !== "complete")
+    || (env.SCRAPE_RESULT || "success") !== "success" || !importReady || workbooks.summary.blocked_band_count > 0;
+  const lines = [partial ? "VipCars | NIEPEŁNY" : "VipCars", "",
+    `Daty startu: ${startDates}`, `Czas trwania: ${durationLabel} dni`,
+    percent == null ? "Dane cenowe: brak danych." : `Dane cenowe uzyskano dla ${priceChecks}/${coverageRows.length} sprawdzeń (${percent}%).`,
+    "Tam, gdzie nie znaleziono lub nie potwierdzono ceny, nie zmieniano stawek."];
+  const mmAlert = buildMissingMmStartDateAlert(rows, coverageRows);
+  if (mmAlert) lines.push(mmAlert);
+  if (partial) lines.push(`Status: ${buildRunStatus(coverageRows, env.SCRAPE_RESULT || "success")}`);
+  lines.push("");
+  if (!summaryIssue) {
+    const summary = workbooks.summary, stats = summary.change_statistics;
+    const validStats = stats && [stats.increase_count, stats.decrease_count].every((count) => Number.isSafeInteger(count) && count >= 0)
+      && stats.increase_count + stats.decrease_count === summary.change_count;
+    lines.push(validStats ? `Zmiany w Excelu: podwyżki ${stats.increase_count}, obniżki ${stats.decrease_count}.`
+      : `Zmiany w Excelu: ${summary.change_count} zmian stawek (brak podziału na podwyżki i obniżki).`);
+    if (validStats) {
+      for (const [count, average, label] of [[stats.increase_count, stats.average_increase_net_eur_day, "podwyżka"],
+        [stats.decrease_count, stats.average_decrease_net_eur_day, "obniżka"]]) {
+        if (count > 0 && typeof average === "number" && Number.isFinite(average) && average > 0) {
+          lines.push(`Średnia ${label} względem bazy: ${new Intl.NumberFormat("pl-PL", {
+            minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(average)} EUR netto/dobę.`);
+        }
+      }
+    }
+    if (summary.blocked_band_count > 0) lines.push(`Zablokowane pasma cenowe: ${summary.blocked_band_count}. Baza pozostała dla zablokowanych zakresów.`);
+  }
+  lines.push("");
+  const base = `${String(workbooks.pageUrl || "").replace(/\/+$/, "")}/`;
+  if (importReady) {
+    lines.push(`Import: ${base}vipcars-rates-import-ready.xlsx`, `Rekomendacje: ${base}vipcars-recommendations.xlsx`);
+  } else {
+    lines.push(buildWorkbookSection(workbooks));
+  }
+  if (workbooks.pageUrl) lines.push(`Raport cen: ${base}report.html`);
+  if (partial) {
+    if (env.ARTIFACT_URL) lines.push(`Kopia wyników: ${env.ARTIFACT_URL}`);
+    if (env.RUN_URL) lines.push(`GitHub Actions: ${env.RUN_URL}`);
+  }
+  return lines.join("\n");
+}
+
+function buildTelegramMessageFromFiles(env = process.env) {
+  const outputDir = env.OUTPUT_DIR || "output";
+  const readCsv = (filename) => fs.existsSync(path.join(outputDir, filename))
+    ? parseCsv(fs.readFileSync(path.join(outputDir, filename), "utf8")) : [];
+  return buildTelegramMessage({ env, coverageRows: readCsv("vipcars-coverage.csv"), rows: readCsv("vipcars-results.csv"),
+    workbooks: readWorkbookState("input/vipcars-baseline-manifest.json", env.RATE_WORKBOOK_STATUS, env.PAGE_URL, outputDir) });
 }
 
 function classifyStartDatesWithoutMm(rows, coverageRows) {
@@ -153,7 +244,9 @@ function buildAlertFromFiles(csvPath, coveragePath) {
 }
 
 if (require.main === module) {
-  if (process.argv[2] === "--import-ready") {
+  if (process.argv[2] === "--message") {
+    process.stdout.write(`${buildTelegramMessageFromFiles()}\n`);
+  } else if (process.argv[2] === "--import-ready") {
     process.exitCode = importReadyFromFile(process.argv[3]) ? 0 : 1;
   } else if (process.argv[2] === "--workbooks") {
     process.stdout.write(`${buildWorkbookSectionFromFiles(process.argv[3], process.argv[4], process.argv[5], process.argv[6])}\n`);
@@ -172,6 +265,8 @@ if (require.main === module) {
 }
 
 module.exports = {
+  buildTelegramMessage,
+  buildTelegramMessageFromFiles,
   buildRunStatus,
   buildWorkbookSection,
   buildWorkbookSectionFromFiles,
