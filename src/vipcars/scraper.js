@@ -75,6 +75,7 @@ class VipCarsScraper {
     for (let pass = 0; pass < passAttempts; pass += 1) {
       const attempts = counts.get(key) || 0;
       let waiting = false;
+      let cooldownWaitMs = 0;
       while (true) {
         if (Date.now() >= deadlineAt || attempts >= maxAttempts) {
           const code = Date.now() >= deadlineAt ? "JOB_DEADLINE" : "ATTEMPT_LIMIT";
@@ -91,11 +92,13 @@ class VipCarsScraper {
         }
         if (!waiting) console.log(`WAIT VipCars server cooldown until ${new Date(cooldown.until).toISOString()}`);
         waiting = true;
+        const waitStarted = Date.now();
         await new Promise((resolve) => setTimeout(resolve, Math.min(60000, cooldown.until - Date.now())));
+        cooldownWaitMs += Date.now() - waitStarted;
       }
       counts.set(key, attempts + 1);
       outcome = await this.runSingleLocation(browser, location, {
-        attempt: attempts + 1, deadlineAt, cooldown, onCooldown: options.onCooldown
+        attempt: attempts + 1, deadlineAt, cooldown, onCooldown: options.onCooldown, cooldownWaitMs
       });
       outcome.attempts = attempts + 1;
       outcome.retryable = !outcome.ok && outcome.attempts < maxAttempts
@@ -125,7 +128,7 @@ class VipCarsScraper {
     const remaining = () => Math.max(1, deadlineAt - Date.now());
     const diagnostics = createAttemptDiagnostics({
       location, pickup_date: this.config.pickupDate,
-      duration_days: this.config.currentDurationDays, attempt
+      duration_days: this.config.currentDurationDays, attempt, cooldown_wait_ms: options.cooldownWaitMs || 0
     });
     let context;
     let page;
@@ -172,8 +175,15 @@ class VipCarsScraper {
           return;
         }
         if (resultRequest && route.request().method() === "GET") {
-          try { await resultRequestGate(() => route.continue()); }
+          const pagination = this.config.networkResults && resultRequest.params.has("offset")
+            && resultRequest.params.get("offset") !== "0";
+          const finishWait = diagnostics.start(pagination ? "network_throttle_wait" : "result_throttle_wait", { aggregate: true });
+          try { await resultRequestGate(() => {
+            finishWait();
+            return route.continue();
+          }); }
           catch (error) {
+            finishWait("failure");
             rejectDeadline(error);
             await route.abort().catch(() => {});
           }
@@ -234,7 +244,9 @@ class VipCarsScraper {
         const captured = await bounded((automaticApplied ? filteredResults : initialResults).read());
         if (!captured) throw transport.transportError("Initial result response was not captured.", true);
         raw = await diagnostics.measure("network_offers", () => bounded(this.loadNetworkOffers(
-          context, page, captured, location, { ...waitOptions, allowedResultUrls, resultFailures, filteredEmpty })));
+          context, page, captured, location, { ...waitOptions, allowedResultUrls, resultFailures, filteredEmpty,
+            measure: (name, action, extra = {}) => diagnostics.measure(name,
+              () => bounded(Promise.resolve().then(action)), { aggregate: true, ...extra }) })));
       } else {
         await diagnostics.measure("load_cards", () => bounded(this.loadSearchResultCards(page, waitOptions)));
       }
@@ -266,6 +278,7 @@ class VipCarsScraper {
       if (context) await settleWithin(context.close().catch(() => {}), 2000);
       const timing = diagnostics.snapshot();
       console.log(`TIMING ${location} attempt=${attempt} total_ms=${timing.elapsed_ms} `
+        + `cooldown_wait_ms=${timing.cooldown_wait_ms} pageCount=${timing.result_state?.pageCount ?? 0} `
         + timing.stages.map((stage) => `${stage.name}=${stage.elapsed_ms}ms/${stage.status}`).join(" "));
     }
   }
@@ -330,59 +343,68 @@ class VipCarsScraper {
   }
 
   async loadNetworkOffers(context, page, captured, location, options) {
-    transport.validateResultRequest(captured.source, this.buildSearchUrl(location));
-    const filtered = captured.source.params.get("load_type") === "get_result_desktop_filter";
-    if (filtered) {
-      const specs = captured.source.params.getAll("specs_checks");
-      const otherFilters = ["supplier_checks", "class_checks", "fuel_checks", "location_checks", "excess_checks",
-        "deposit_checks", "seat_checks", "mileage_checks", "fuel_policy_checks", "payment_type_checks"];
-      if (specs.length !== 1 || specs[0] !== "automatic"
-          || otherFilters.some((field) => captured.source.params.getAll(field).some(Boolean))) {
-        throw transport.transportError("Automatic result request contains unexpected filters.");
+    const measure = options.measure || ((name, action) => action());
+    const filtered = await measure("network_prep", async () => {
+      transport.validateResultRequest(captured.source, this.buildSearchUrl(location));
+      const filtered = captured.source.params.get("load_type") === "get_result_desktop_filter";
+      if (filtered) {
+        const specs = captured.source.params.getAll("specs_checks");
+        const otherFilters = ["supplier_checks", "class_checks", "fuel_checks", "location_checks", "excess_checks",
+          "deposit_checks", "seat_checks", "mileage_checks", "fuel_policy_checks", "payment_type_checks"];
+        if (specs.length !== 1 || specs[0] !== "automatic"
+            || otherFilters.some((field) => captured.source.params.getAll(field).some(Boolean))) {
+          throw transport.transportError("Automatic result request contains unexpected filters.");
+        }
+        const ranges = captured.source.params.getAll("price_range");
+        const limits = await page.evaluate(() => Array.from(document.querySelectorAll("#price_range"))
+          .map((element) => [element.getAttribute("data-slider-min"), element.getAttribute("data-slider-max")]));
+        const number = (value) => /^\d+(?:\.\d+)?$/.test(String(value ?? "").trim()) ? Number(value) : NaN;
+        const requestedRange = ranges.length === 1 ? ranges[0].split(",").map(number) : [];
+        const fullRange = limits.length === 1 ? limits[0].map(number) : [];
+        if (requestedRange.length !== 2 || fullRange.length !== 2
+            || ![...requestedRange, ...fullRange].every(Number.isFinite)
+            || fullRange[0] > fullRange[1]
+            || requestedRange.some((value, index) => value !== fullRange[index])) {
+          throw transport.transportError("Automatic result request does not use the full price range.");
+        }
       }
-      const ranges = captured.source.params.getAll("price_range");
-      const limits = await page.evaluate(() => Array.from(document.querySelectorAll("#price_range"))
-        .map((element) => [element.getAttribute("data-slider-min"), element.getAttribute("data-slider-max")]));
-      const number = (value) => /^\d+(?:\.\d+)?$/.test(String(value ?? "").trim()) ? Number(value) : NaN;
-      const requestedRange = ranges.length === 1 ? ranges[0].split(",").map(number) : [];
-      const fullRange = limits.length === 1 ? limits[0].map(number) : [];
-      if (requestedRange.length !== 2 || fullRange.length !== 2
-          || ![...requestedRange, ...fullRange].every(Number.isFinite)
-          || fullRange[0] > fullRange[1]
-          || requestedRange.some((value, index) => value !== fullRange[index])) {
-        throw transport.transportError("Automatic result request does not use the full price range.");
-      }
-    }
+      return filtered;
+    });
     if (options.filteredEmpty) return [];
-    const parserPage = await context.newPage();
+    const parserPage = await measure("network_prep", () => context.newPage());
     try {
-      const parsePage = async (html) => {
+      const parsePage = (html) => measure("network_parser", async () => {
         const batch = await parseOfferPage(parserPage, html, location);
         if (filtered && batch.cards.some((card) => !card.automatic)) {
           throw transport.transportError("Non-automatic offer in an automatic result page.");
         }
         return batch;
-      };
+      });
       const initial = await parsePage(captured.html);
-      const visible = await page.evaluate(readOfferCards, { location });
-      transport.compareVisibleCards(initial.cards, visible);
-      const visibleCounts = await page.evaluate(() => ["car_count_data", "car_count"]
-        .map((id) => {
-          const element = document.getElementById(id);
-          return String(element?.value ?? element?.textContent ?? "").trim();
-        }).filter(Boolean));
-      if (!visibleCounts.length || visibleCounts.some((value) => !/^\d+$/.test(value) || Number(value) !== initial.totalCount)) {
-        throw transport.transportError("Result response and visible DOM total counts differ.");
-      }
-      const paginationSource = initial.cards.length < initial.totalCount
-        ? await transport.preparePaginationSource(page, captured.source) : captured.source;
+      await measure("network_dom_parity", async () => {
+        const visible = await page.evaluate(readOfferCards, { location });
+        transport.compareVisibleCards(initial.cards, visible);
+        const visibleCounts = await page.evaluate(() => ["car_count_data", "car_count"]
+          .map((id) => {
+            const element = document.getElementById(id);
+            return String(element?.value ?? element?.textContent ?? "").trim();
+          }).filter(Boolean));
+        if (!visibleCounts.length || visibleCounts.some((value) => !/^\d+$/.test(value) || Number(value) !== initial.totalCount)) {
+          throw transport.transportError("Result response and visible DOM total counts differ.");
+        }
+      });
+      const paginationSource = await measure("network_prep", () => initial.cards.length < initial.totalCount
+        ? transport.preparePaginationSource(page, captured.source) : captured.source);
       const cards = await transport.collectResultPages({ initial, source: paginationSource,
         deadlineAt: options.deadlineAt, onState: options.onState,
         fetchPage: async (url, timeout) => {
           try {
             options.allowedResultUrls.add(url);
-            const response = await options.resultFailures.correlate(url, () =>
-              transport.fetchResultPage(page, url, timeout, paginationSource.headers));
+            // Fetch includes browser routing; exclude its paced dispatch wait from HTTP time.
+            const response = await measure("network_transport_wait", () => options.resultFailures.correlate(url, () =>
+              measure("network_http_fetch", () => transport.fetchResultPage(page, url, timeout, paginationSource.headers),
+                { exclude: ["network_throttle_wait"] })),
+            { exclude: ["network_http_fetch", "network_throttle_wait"] });
             if (response.status !== 200) {
               throw transport.transportError(`Result page HTTP ${response.status}.`, response.status >= 500);
             }
@@ -398,7 +420,7 @@ class VipCarsScraper {
       console.log(`    Network results: ${cards.length}/${initial.totalCount}; first-page DOM values verified.`);
       return cards;
     } finally {
-      await parserPage.close();
+      await measure("network_prep", () => parserPage.close());
     }
   }
 

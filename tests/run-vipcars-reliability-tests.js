@@ -24,7 +24,8 @@ async function main() {
     const config = loadConfig(["--config", path.join(root, "vipcars.config.example.json"),
       "--pickup-dates", chunk.pickup_dates, "--durations-days", chunk.durations]);
     assert.equal(config.pickupDateOptions.length, 1);
-    assert.ok(config.durationDays.length * config.locations.length <= 42);
+    assert.ok(config.durationDays.length * config.locations.length <= 21);
+    assert.equal(new Set(config.durationDays.map((duration) => duration <= 6 ? 0 : duration <= 8 ? 1 : 2)).size, 1);
     for (const duration of config.durationDays) for (const location of config.locations) {
       const key = [config.pickupDateOptions[0], duration, location].join("|");
       assert.equal(checks.has(key), false);
@@ -32,7 +33,7 @@ async function main() {
     }
   }
   assert.equal(checks.size, rollingDays * 91);
-  console.log(`PASS import-band chunks preserve all ${rollingDays * 91} checks with at most 42 checks per job`);
+  console.log(`PASS import-band chunks preserve all ${rollingDays * 91} checks with at most 21 checks per job`);
 
   const pinnedArgs = ["--config", path.join(root, "vipcars.config.example.json"),
     "--pickup-dates", "2026-01-01,2026-01-02", "--pickup-chunk-total", "2", "--pickup-chunk-index", "2"];

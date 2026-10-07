@@ -325,6 +325,7 @@ function loadConfig(argv) {
     dropoffTime: normalizeWhitespace(dropoffTime),
     durationDays: configuredDurations.length ? configuredDurations : [2],
     pickupRollingDays: rollingPickupDays || 0,
+    pickupWeekdays: [...new Set(pickupWeekdays)],
     residenceCountry: normalizeWhitespace(merged.residenceCountry || merged["residence-country"] || "Poland"),
     driverAge: Number.parseInt(merged.driverAge || merged["driver-age"] || "30", 10),
     maxProvidersPerLocation: Number.parseInt(merged.maxProvidersPerLocation || "25", 10),

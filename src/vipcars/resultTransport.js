@@ -445,6 +445,7 @@ async function collectResultPages({ initial, source, deadlineAt, fetchPage, onSt
   let batch = initial;
   let offset = 0;
   let page = 0;
+  let pageCount = 0;
   if (!Number.isSafeInteger(total) || total <= 0) throw transportError("Invalid result count.");
   while (true) {
     if (batch.totalCount !== total) throw transportError("Result count changed during pagination.", true);
@@ -459,9 +460,12 @@ async function collectResultPages({ initial, source, deadlineAt, fetchPage, onSt
       cards.push(card);
     }
     if (cards.length > total) throw transportError("Result count exceeded expected total.");
-    onState?.({ cardCount: cards.length, totalCount: total, busy: cards.length < total });
+    if (cards.length < total && batch.nextOffset !== cards.length) {
+      throw transportError("Result cursor skips uncollected offers.");
+    }
+    pageCount += 1;
+    onState?.({ cardCount: cards.length, pageCount, totalCount: total, busy: cards.length < total });
     if (cards.length === total) return cards;
-    if (batch.nextOffset !== cards.length) throw transportError("Result cursor skips uncollected offers.");
     offset = batch.nextOffset;
     page = batch.nextPage;
     const remaining = deadlineAt - Date.now();

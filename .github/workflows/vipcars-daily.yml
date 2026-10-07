@@ -17,7 +17,7 @@ on:
       - "package-lock.json"
   schedule:
     # Prepare the next morning's report, allowing for scheduler and scrape delays.
-    - cron: "17 19 * * *"
+    - cron: "30 16 * * *"
       timezone: "Europe/Warsaw"
   workflow_dispatch:
     inputs:
@@ -51,6 +51,7 @@ on:
         default: "automatic"
 
 permissions:
+  actions: read
   contents: read
   pages: write
   id-token: write
@@ -95,6 +96,7 @@ jobs:
         id: options
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_LOCATIONS: ${{ inputs.locations }}
           INPUT_PICKUP_WEEKDAYS: ${{ inputs.pickup_weekdays }}
           INPUT_PICKUP_ROLLING_DAYS: ${{ inputs.pickup_rolling_days }}
@@ -127,6 +129,7 @@ jobs:
           vehicle_category="$INPUT_VEHICLE_CATEGORY"
           transmission="${INPUT_TRANSMISSION:-$default_transmission}"
           transmission="$(node -e 'process.stdout.write(require("./src/vipcars/config").normalizeTransmission(process.argv[1]))' -- "$transmission")"
+          run_created_at="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq '.created_at')"
 
           plan_command=(node src/vipcars/pickupPlan.js --dates \
             --config vipcars.config.example.json \
@@ -141,6 +144,11 @@ jobs:
             plan_command+=(--vehicle-category "$vehicle_category")
           fi
           plan_command+=(--transmission "$transmission")
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+            plan_command+=(--scheduled-at "$run_created_at")
+          else
+            plan_command+=(--run-created-at "$run_created_at")
+          fi
           pickup_dates="$("${plan_command[@]}")"
           IFS=',' read -ra planned_dates <<< "$pickup_dates"
           pickup_count="${#planned_dates[@]}"
@@ -212,6 +220,51 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Select previous chunk checkpoint
+        id: checkpoint
+        if: github.run_attempt > 1
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHUNK_INDEX: ${{ matrix.chunk }}
+        run: |
+          artifact_id=""
+          for (( attempt=GITHUB_RUN_ATTEMPT-1; attempt>=1; attempt-- )); do
+            artifact_name="vipcars-results-chunk-${CHUNK_INDEX}-${GITHUB_RUN_NUMBER}-attempt-${attempt}"
+            gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100&name=${artifact_name}" \
+              --jq '.artifacts[] | {id, name, expired}' > prior-artifact.jsonl
+            if [[ ! -s prior-artifact.jsonl ]]; then
+              continue
+            fi
+            artifact_id="$(node src/vipcars/runArtifacts.js resume "$CHUNK_INDEX" \
+              "$GITHUB_RUN_NUMBER" "$GITHUB_RUN_ATTEMPT" < prior-artifact.jsonl)"
+            break
+          done
+          if [[ -z "$artifact_id" ]]; then
+            echo "::error::Missing checkpoint for chunk ${CHUNK_INDEX}; refusing to reset attempts and server cooldown."
+            exit 1
+          fi
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+
+      - name: Restore previous chunk checkpoint
+        if: steps.checkpoint.outputs.artifact_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.checkpoint.outputs.artifact_name }}
+          path: restored-chunk
+          github-token: ${{ github.token }}
+
+      - name: Preserve restored chunk outputs
+        if: steps.checkpoint.outputs.artifact_id != ''
+        shell: bash
+        env:
+          CHUNK_INDEX: ${{ matrix.chunk }}
+        run: |
+          test -f "restored-chunk/output/vipcars-coverage-chunk-${CHUNK_INDEX}.csv.resume.json"
+          mkdir -p output
+          cp -a restored-chunk/output/. output/
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -236,6 +289,8 @@ jobs:
           CHUNK_INDEX: ${{ matrix.chunk }}
           CHUNK_TOTAL: ${{ needs.prepare.outputs.chunk_total }}
           PICKUP_DATES: ${{ matrix.pickup_dates }}
+          RESUME_ARTIFACT_ID: ${{ steps.checkpoint.outputs.artifact_id }}
+          VIPCARS_RESUME_SAME_GITHUB_RUN: "1"
         run: |
           mkdir -p output
           mkdir -p "artifacts/vipcars/chunk-${CHUNK_INDEX}"
@@ -253,6 +308,10 @@ jobs:
             --artifacts-dir "artifacts/vipcars/chunk-${CHUNK_INDEX}" \
             --output-csv "output/vipcars-results-chunk-${CHUNK_INDEX}.csv" \
             --output-coverage "output/vipcars-coverage-chunk-${CHUNK_INDEX}.csv")
+
+          if [[ -n "$RESUME_ARTIFACT_ID" ]]; then
+            command+=(--resume)
+          fi
 
           if [[ "$TRANSMISSION" == "automatic" ]]; then
             command+=(--network-results)
@@ -276,7 +335,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vipcars-results-chunk-${{ matrix.chunk }}-${{ github.run_number }}
+          name: vipcars-results-chunk-${{ matrix.chunk }}-${{ github.run_number }}-attempt-${{ github.run_attempt }}
           path: |
             output/vipcars-results-chunk-${{ matrix.chunk }}.csv
             output/vipcars-coverage-chunk-${{ matrix.chunk }}.csv
@@ -320,16 +379,30 @@ jobs:
       - name: Install Python dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
 
+      - name: Select latest chunk results
+        id: chunk-artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | {id, name, expired}' > chunk-artifacts.jsonl
+          artifact_ids="$(node src/vipcars/runArtifacts.js ids "$GITHUB_RUN_NUMBER" \
+            "$GITHUB_RUN_ATTEMPT" < chunk-artifacts.jsonl)"
+          echo "artifact_ids=$artifact_ids" >> "$GITHUB_OUTPUT"
+
       - name: Download VipCars chunk results
+        if: steps.chunk-artifacts.outputs.artifact_ids != ''
         uses: actions/download-artifact@v4
         with:
           path: chunk-artifacts
-          pattern: vipcars-results-chunk-*-${{ github.run_number }}
+          artifact-ids: ${{ steps.chunk-artifacts.outputs.artifact_ids }}
+          github-token: ${{ github.token }}
 
       - name: Merge VipCars chunk results
         shell: bash
         run: |
-          mkdir -p output
+          mkdir -p output chunk-artifacts
           node src/vipcars/mergeCsv.js chunk-artifacts output/vipcars-results.csv
           node src/vipcars/coverage.js chunk-artifacts output/vipcars-coverage.csv
           find chunk-artifacts -type f -name 'vipcars-run-log-chunk-*.txt' -exec cat {} + > output/vipcars-run-log.txt || true
@@ -410,18 +483,21 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
+          name: github-pages-${{ github.run_id }}-attempt-${{ github.run_attempt }}
 
       - name: Deploy GitHub Pages
         id: pages-deployment
         if: hashFiles('public/report.html') != ''
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_id }}-attempt-${{ github.run_attempt }}
 
       - name: Upload VipCars merged results
         id: upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vipcars-results-${{ github.run_number }}
+          name: vipcars-results-${{ github.run_number }}-attempt-${{ github.run_attempt }}
           path: |
             output/vipcars-results.csv
             output/vipcars-coverage.csv

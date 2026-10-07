@@ -37,6 +37,9 @@ async function main() {
   const originalSingleLocation = VipCarsScraper.prototype.runSingleLocation;
   const originalExitCode = process.exitCode;
   const originalDateNow = Date.now;
+  const githubEnvKeys = ["GITHUB_ACTIONS", "GITHUB_RUN_ID", "GITHUB_SHA", "GITHUB_RUN_ATTEMPT", "VIPCARS_RESUME_SAME_GITHUB_RUN"];
+  const originalGithubEnv = Object.fromEntries(githubEnvKeys.map((key) => [key, process.env[key]]));
+  githubEnvKeys.forEach((key) => { delete process.env[key]; });
   const testNow = Date.parse("2026-09-27T12:00:00.000Z");
   let launches = 0;
   let closes = 0;
@@ -394,13 +397,247 @@ async function main() {
     assert.equal(replacedState.results.length, 2);
     assert.equal(replacedState.coverage.every((row) => row.status === "complete"), true);
     console.log("PASS a normal run intentionally replaces prior resume state");
+
+    await testPermanentFailureResume(temp, runCli);
+    await testWorkflowResume(temp, runCli);
   } finally {
     chromium.launch = originalLaunch;
     VipCarsScraper.prototype.runSingleLocation = originalSingleLocation;
     Date.now = originalDateNow;
     process.exitCode = originalExitCode;
+    for (const key of githubEnvKeys) {
+      if (originalGithubEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = originalGithubEnv[key];
+    }
     fs.rmSync(temp, { recursive: true, force: true });
   }
+}
+
+async function testPermanentFailureResume(temp, runCli) {
+  const configPath = path.join(temp, "permanent-config.json");
+  const coveragePath = path.join(temp, "permanent-coverage.csv");
+  const resumePath = `${coveragePath}.resume.json`;
+  writeConfig(configPath, { resultsPath: path.join(temp, "permanent-results.csv"),
+    coveragePath, artifactsDir: temp });
+  const calls = [];
+  VipCarsScraper.prototype.runSingleLocation = async function (browser, location, options) {
+    calls.push({ location, attempt: options.attempt });
+    if (location === "Krakow") throw new Error("Interrupted after permanent failure");
+    const error = new Error("HTTP 403: search page unavailable.");
+    error.code = "HTTP_403";
+    error.retryable = false;
+    return { ok: false, error };
+  };
+  const interrupted = await invokeCli(runCli, ["--config", configPath]);
+  assert.match(interrupted.errors, /Interrupted after permanent failure/);
+  const checkpoint = readJson(resumePath);
+  assert.equal(checkpoint.retryability?.[checkKey("Warsaw")], false,
+    "Permanent failure must be durable before the following city is interrupted");
+  calls.length = 0;
+  VipCarsScraper.prototype.runSingleLocation = async function (browser, location, options) {
+    calls.push({ location, attempt: options.attempt });
+    return success(this.config, location);
+  };
+  const recovered = await invokeCli(runCli, ["--config", configPath, "--resume"]);
+  assert.equal(recovered.exitCode, 1, "Permanent failure remains incomplete, never fabricated as complete");
+  assert.deepEqual(calls, [{ location: "Krakow", attempt: 2 }]);
+  assert.equal(readJson(resumePath).attempt_counts[checkKey("Warsaw")], 1);
+  calls.length = 0;
+  await invokeCli(runCli, ["--config", configPath, "--resume"]);
+  assert.deepEqual(calls, []);
+
+  const legacy = clone(checkpoint);
+  delete legacy.retryability;
+  writeJson(resumePath, legacy);
+  calls.length = 0;
+  await invokeCli(runCli, ["--config", configPath, "--resume"]);
+  assert.deepEqual(calls, [{ location: "Krakow", attempt: 2 }],
+    "Legacy explicit HTTP 403 failures must not be repeated either");
+  const config = loadConfig(["--config", configPath]);
+  const recoveredCheckpoint = readJson(resumePath);
+  for (const [error, cooldownUntil] of [["HTTP 429: search page unavailable.", 0],
+    ["HTTP 400: Retry-After 120 seconds.", Date.now() + 120000],
+    ["HTTP 403: search page unavailable.", Date.now() + 120000]]) {
+    const older = clone(legacy);
+    older.coverage.find((row) => row.location === "Warsaw").error = error;
+    older.cooldown_until = cooldownUntil;
+    writeJson(resumePath, older);
+    assert.notEqual(loadRunState(resumePath, config).retryability.get(checkKey("Warsaw")), false,
+      "Legacy unknown retryability or a cooldown must not be inferred as a permanent failure");
+  }
+  for (const retryability of [null, [], { [checkKey("Warsaw")]: "false" },
+    { unexpected: false }, { [checkKey("Krakow")]: true }]) {
+    const corrupt = clone(recoveredCheckpoint);
+    corrupt.retryability = retryability;
+    writeJson(resumePath, corrupt);
+    assert.throws(() => loadRunState(resumePath, config), /retryability/i);
+  }
+  console.log("PASS permanent failures survive interruption and resume, including legacy HTTP 403 checkpoints");
+}
+
+async function testWorkflowResume(temp, runCli) {
+  const configPath = path.join(temp, "workflow-config.json");
+  const coveragePath = path.join(temp, "workflow-coverage.csv");
+  const resultsPath = path.join(temp, "workflow-results.csv");
+  const resumePath = `${coveragePath}.resume.json`;
+  writeConfig(configPath, { resultsPath, coveragePath, artifactsDir: temp,
+    locations: ["Warsaw", "Krakow", "Poznan", "Gdansk"], durationsDays: [2, 3] });
+  const config = loadConfig(["--config", configPath]);
+  process.env.GITHUB_RUN_ID = "leftover-local-value";
+  process.env.GITHUB_SHA = "leftover-local-value";
+  process.env.GITHUB_RUN_ATTEMPT = "leftover-local-value";
+  assert.equal(createRunState(config).workflowScope, null,
+    "Outside Actions, unrelated GITHUB_* environment values must not bind local checkpoints");
+  process.env.VIPCARS_RESUME_SAME_GITHUB_RUN = "1";
+  assert.throws(() => createRunState(config), /GITHUB_ACTIONS/i,
+    "Explicit workflow recovery must fail closed outside Actions");
+  process.env.GITHUB_ACTIONS = "true";
+  const startedAt = Date.parse("2026-09-26T21:30:00.000Z");
+  let now = startedAt;
+  Date.now = () => now;
+  process.env.GITHUB_RUN_ID = "123456789";
+  process.env.GITHUB_SHA = "a".repeat(40);
+  process.env.GITHUB_RUN_ATTEMPT = "1";
+  process.env.VIPCARS_RESUME_SAME_GITHUB_RUN = "1";
+  const calls = [];
+  VipCarsScraper.prototype.runSingleLocation = async function (browser, location, options) {
+    calls.push({ location, duration: this.config.currentDurationDays, attempt: options.attempt });
+    if (location === "Poznan") throw new Error("Interrupted workflow");
+    if (location === "Krakow") return { ok: false, error: new Error("Timeout 45000ms exceeded.") };
+    return success(this.config, location);
+  };
+  const interrupted = await invokeCli(runCli, ["--config", configPath]);
+  assert.match(interrupted.errors, /Interrupted workflow/);
+  const checkpoint = readJson(resumePath);
+  assert.deepEqual(checkpoint.workflow_scope, { run_id: "123456789", sha: "a".repeat(40), run_attempt: 1 });
+  assert.equal(checkpoint.coverage.length, 8);
+  const overnight = startedAt + 15 * 60 * 60 * 1000;
+  checkpoint.cooldown_until = overnight + config.jobBudgetMs + 1000;
+  writeJson(resumePath, checkpoint);
+  now = overnight;
+  process.env.GITHUB_RUN_ATTEMPT = "2";
+  calls.length = 0;
+  const blockedByCooldown = await invokeCli(runCli, ["--config", configPath, "--resume"]);
+  assert.equal(blockedByCooldown.exitCode, 1);
+  assert.deepEqual(calls, [], "Future cooldown must survive the new job's fresh budget");
+  const deferred = readJson(resumePath);
+  assert.deepEqual(deferred.attempt_counts, checkpoint.attempt_counts);
+  assert.deepEqual(deferred.results, checkpoint.results);
+  assert.equal(deferred.cooldown_until, checkpoint.cooldown_until);
+  assert.equal(deferred.started_at, checkpoint.started_at);
+  assert.equal(deferred.workflow_scope.run_attempt, 2);
+  assert.equal(deferred.budget_started_at, new Date(overnight).toISOString());
+
+  now = checkpoint.cooldown_until + 1;
+  const sameAttempt = await invokeCli(runCli, ["--config", configPath, "--resume"]);
+  assert.equal(sameAttempt.exitCode, 1);
+  assert.deepEqual(calls, [], "Restarting the same attempt must not renew its expired budget");
+  assert.equal(readJson(resumePath).budget_started_at, deferred.budget_started_at);
+  process.env.GITHUB_RUN_ATTEMPT = "3";
+  const freshDeadline = now + config.jobBudgetMs;
+  VipCarsScraper.prototype.runSingleLocation = async function (browser, location, options) {
+    calls.push({ location, duration: this.config.currentDurationDays, attempt: options.attempt });
+    assert.equal(options.deadlineAt, freshDeadline);
+    assert.equal(options.cooldown.until, checkpoint.cooldown_until);
+    if (location === "Krakow" && this.config.currentDurationDays === 2) {
+      return { ok: false, error: new Error("Timeout 45000ms exceeded.") };
+    }
+    return success(this.config, location);
+  };
+  const recovered = await invokeCli(runCli, ["--config", configPath, "--resume"]);
+  assert.equal(recovered.exitCode, 1);
+  assert.deepEqual(calls, [
+    { location: "Krakow", duration: 2, attempt: 2 },
+    { location: "Poznan", duration: 2, attempt: 2 },
+    { location: "Gdansk", duration: 2, attempt: 1 },
+    { location: "Warsaw", duration: 3, attempt: 1 },
+    { location: "Krakow", duration: 3, attempt: 1 },
+    { location: "Poznan", duration: 3, attempt: 1 },
+    { location: "Gdansk", duration: 3, attempt: 1 },
+    { location: "Krakow", duration: 2, attempt: 3 }
+  ]);
+  const completed = readJson(resumePath);
+  assert.equal(completed.run_id, checkpoint.run_id);
+  assert.equal(completed.started_at, checkpoint.started_at);
+  assert.deepEqual(completed.fingerprint, checkpoint.fingerprint);
+  assert.deepEqual(completed.workflow_scope, { ...checkpoint.workflow_scope, run_attempt: 3 });
+  assert.equal(completed.budget_started_at, new Date(now).toISOString());
+  assert.deepEqual(completed.results[0], checkpoint.results[0]);
+  assert.equal(completed.results.length, 7);
+  assert.equal(completed.coverage.length, 8);
+  assert.equal(completed.coverage.filter((row) => row.status === "complete").length, 7);
+  assert.equal(completed.attempt_counts[checkKey("Krakow")], 3);
+  calls.length = 0;
+  await invokeCli(runCli, ["--config", configPath, "--resume"]);
+  assert.deepEqual(calls, []);
+  assert.equal(parseCsv(fs.readFileSync(resultsPath, "utf8")).length, 7);
+  console.log("PASS overnight workflow recovery preserves full scope, values, cooldown, and the cumulative three-attempt limit");
+
+  for (const [key, value] of [["GITHUB_RUN_ID", "987654321"], ["GITHUB_SHA", "b".repeat(40)],
+    ["GITHUB_RUN_ID", undefined], ["GITHUB_SHA", undefined], ["GITHUB_RUN_ATTEMPT", undefined],
+    ["GITHUB_RUN_ATTEMPT", "2"], ["GITHUB_RUN_ATTEMPT", "bad"]]) {
+    const previous = process.env[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+    const before = fs.readFileSync(resumePath, "utf8");
+    const rejected = await invokeCli(runCli, ["--config", configPath, "--resume"]);
+    assert.equal(rejected.exitCode, 1);
+    assert.match(rejected.errors, /workflow scope|GITHUB_RUN_ID|GITHUB_SHA|GITHUB_RUN_ATTEMPT/i);
+    assert.equal(fs.readFileSync(resumePath, "utf8"), before);
+    process.env[key] = previous;
+  }
+  for (const changedConfig of [{ ...config, locations: ["Warsaw"] },
+    { ...config, pickupDateOptions: ["2026-09-11"] }, { ...config, durationDays: [2] }]) {
+    assert.throws(() => loadRunState(resumePath, changedConfig, now), /fingerprint/i);
+  }
+  const legacy = clone(completed);
+  delete legacy.workflow_scope;
+  writeJson(resumePath, legacy);
+  assert.throws(() => loadRunState(resumePath, config, now), /workflow scope/i);
+  writeJson(resumePath, completed);
+  assert.doesNotThrow(() => loadRunState(resumePath, config, startedAt + 24 * 60 * 60 * 1000));
+  assert.throws(() => loadRunState(resumePath, config, startedAt + 24 * 60 * 60 * 1000 + 1), /24 hours/i);
+  assert.throws(() => loadRunState(resumePath, config, startedAt - 1), /future/i);
+  for (const budgetStartedAt of ["invalid", new Date(startedAt - 1).toISOString(),
+    new Date(now + 1).toISOString()]) {
+    writeJson(resumePath, { ...completed, budget_started_at: budgetStartedAt });
+    assert.throws(() => loadRunState(resumePath, config, now), /budget_started_at/i);
+  }
+  for (const scope of [{ ...completed.workflow_scope, run_attempt: 0 },
+    { ...completed.workflow_scope, sha: "bad" }, { ...completed.workflow_scope, run_id: 123456789 }]) {
+    writeJson(resumePath, { ...completed, workflow_scope: scope });
+    assert.throws(() => loadRunState(resumePath, config, now), /workflow scope/i);
+  }
+  const previousNow = now;
+  now = startedAt + 24 * 60 * 60 * 1000;
+  process.env.GITHUB_RUN_ATTEMPT = "4";
+  writeJson(resumePath, { ...checkpoint, cooldown_until: 0 });
+  calls.length = 0;
+  const batchExpired = await invokeCli(runCli, ["--config", configPath, "--resume"]);
+  assert.equal(batchExpired.exitCode, 1);
+  assert.deepEqual(calls, [], "Even a higher attempt cannot extend the whole batch past 24 hours");
+  assert.deepEqual(readJson(resumePath).attempt_counts, checkpoint.attempt_counts);
+  now = previousNow;
+  process.env.GITHUB_RUN_ATTEMPT = "3";
+  writeJson(resumePath, completed);
+  delete process.env.VIPCARS_RESUME_SAME_GITHUB_RUN;
+  assert.throws(() => loadRunState(resumePath, config, now), /6 hours/i);
+  assert.throws(() => loadRunState(resumePath, config, startedAt + 90 * 60 * 1000), /Warsaw calendar date/i);
+  for (const scope of [false, "", null]) {
+    writeJson(resumePath, { ...checkpoint, workflow_scope: scope });
+    assert.throws(() => loadRunState(resumePath, config, startedAt), /workflow scope/i,
+      "Malformed scope must not be mistaken for an unbound legacy checkpoint");
+  }
+  process.env.GITHUB_SHA = "a".repeat(41);
+  assert.throws(() => createRunState(config, now), /workflow scope/i);
+  process.env.GITHUB_SHA = "a".repeat(40);
+  writeJson(resumePath, completed);
+  delete process.env.GITHUB_RUN_ID;
+  delete process.env.GITHUB_SHA;
+  delete process.env.GITHUB_RUN_ATTEMPT;
+  delete process.env.GITHUB_ACTIONS;
+  assert.throws(() => loadRunState(resumePath, config, startedAt), /workflow scope/i);
+  console.log("PASS wrong/missing workflow identities, changed shards/dates, and expired checkpoints fail closed");
 }
 
 function writeConfig(targetPath, options) {
@@ -409,7 +646,7 @@ function writeConfig(targetPath, options) {
     locations: options.locations || ["Warsaw", "Krakow"],
     pickupDate: "2026-09-10",
     dropoffDate: "2026-09-12",
-    durationsDays: [2],
+    durationsDays: options.durationsDays || [2],
     pickupTime: "10:00",
     dropoffTime: "10:00",
     currency: "EUR",

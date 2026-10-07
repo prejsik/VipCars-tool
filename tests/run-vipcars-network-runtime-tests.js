@@ -116,8 +116,16 @@ async function main() {
   ], { offset: 3, page: 2, total: 3 });
   const unexpectedRequests = [];
   const paginationRequests = [];
+  const requestStarts = [];
+  const timingLines = [];
+  const originalLog = console.log;
+  console.log = (...args) => {
+    if (String(args[0]).startsWith("TIMING ")) timingLines.push(args[0]);
+    originalLog(...args);
+  };
   const bootstrapUrl = new URL(`https://be.supplycars.com/be1/node.php?${JSON.stringify("&load_type=sub_step1&currency=EUR")}`).href;
   let failBootstrap = false;
+  let invalidPagination = false;
   let failedBootstraps = 0;
 
   const browserAdapter = {
@@ -146,6 +154,7 @@ async function main() {
                 }
                 const parsed = parseResultRequest(requestUrl);
                 if (parsed && parsed.params.get("offset") === "0") {
+                  requestStarts.push(Date.now());
                   await route.fulfill({
                     status: 200,
                     contentType: "text/html",
@@ -155,10 +164,12 @@ async function main() {
                   return;
                 }
                 if (parsed && parsed.params.get("offset") === "2") {
+                  requestStarts.push(Date.now());
                   assert.equal(parsed.params.get("car_page"), "1");
                   paginationRequests.push(requestUrl);
                   await route.fulfill({ status: 200, contentType: "text/html",
-                    headers: { "access-control-allow-origin": "*" }, body: nextHtml });
+                    headers: { "access-control-allow-origin": "*" },
+                    body: invalidPagination ? nextHtml.replace('id="offer-3"', 'id="offer-1"') : nextHtml });
                   return;
                 }
                 unexpectedRequests.push(requestUrl);
@@ -202,6 +213,16 @@ async function main() {
       deadlineAt: Date.now() + 5000
     });
     assert.equal(outcome.ok, true, outcome.error?.stack || outcome.error?.message);
+    assert.ok(requestStarts[1] - requestStarts[0] >= 2950, "instrumentation must preserve 3s request pacing");
+    assert.equal(timingLines.length, 1);
+    assert.match(timingLines[0], /pageCount=2\b/);
+    assert.match(timingLines[0], /cooldown_wait_ms=0\b/);
+    for (const name of ["network_throttle_wait", "network_http_fetch", "network_transport_wait",
+      "network_parser", "network_dom_parity", "network_prep"]) {
+      assert.match(timingLines[0], new RegExp(`${name}=\\d+ms/success`));
+      assert.equal(timingLines[0].split(`${name}=`).length - 1, 1, "one aggregate per timing category");
+    }
+    assert.doesNotMatch(timingLines[0], /https?:|private|nested|key=|<article/);
     assert.equal(paginationRequests.length, 1);
     const expectedPaginationUrl = new URL(initialUrl).href
       .replace("offset=0", "offset=2")
@@ -228,7 +249,28 @@ async function main() {
     assert.equal(paginationRequests.length, 1, "bootstrap failure must not attempt result pagination");
     assert.deepEqual(unexpectedRequests, []);
     console.log("PASS offline Chromium detects failed search bootstrap before search timeout");
+    failBootstrap = false;
+    invalidPagination = true;
+    let failureDiagnostics;
+    scraper.captureFailureArtifacts = async (page, location, diagnostics) => {
+      failureDiagnostics = diagnostics;
+    };
+    const invalid = await scraper.runSingleLocation(browserAdapter, "Warsaw", {
+      attempt: 3, cooldown: { until: 0 }
+    });
+    assert.equal(invalid.ok, false, "duplicate pagination cannot become a complete or empty result");
+    assert.equal(invalid.error.code, "RESULT_TRANSPORT_INVALID");
+    assert.match(invalid.error.message, /duplicate/);
+    assert.equal(failureDiagnostics.result_state.pageCount, 1);
+    assert.equal(failureDiagnostics.result_state.cardCount, 2);
+    assert.equal(failureDiagnostics.stages.find((stage) => stage.name === "network_parser").count, 2);
+    assert.match(timingLines.at(-1), /pageCount=1\b/);
+    assert.match(timingLines.at(-1), /network_offers=\d+ms\/failure/);
+    assert.doesNotMatch(JSON.stringify(failureDiagnostics), /private|nested|key=|<article/);
+    assert.deepEqual(unexpectedRequests, []);
+    console.log("PASS failed pagination retains bounded timings and only validated page counts");
   } finally {
+    console.log = originalLog;
     await browser.close();
     fs.rmSync(artifactsDir, { recursive: true, force: true });
   }

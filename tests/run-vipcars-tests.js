@@ -549,18 +549,15 @@ runTest("HTML report marks incomplete coverage", () => {
   assert.match(html, /kontrole planowane: 2 \| z ofertami: 1 \| bez ofert: 0 \| niepełne: 1/);
 });
 
-runTest("daily schedule leaves time for observed delays before 07:00 Warsaw", () => {
+runTest("daily schedule requests one 16:30 Warsaw start for the next morning report", () => {
   const workflow = fs.readFileSync(path.join(__dirname, "../.github/workflows/vipcars-daily.yml"), "utf8");
   const schedules = [...workflow.matchAll(/- cron: "(\d+) (\d+) \* \* \*"/g)];
   assert.equal(schedules.length, 1, "Use one daily schedule, including on DST transitions");
   assert.match(workflow, /timezone: "Europe\/Warsaw"/);
   assert.doesNotMatch(workflow, /scheduleGate|steps\.gate/);
-  const startMinutes = Number(schedules[0][2]) * 60 + Number(schedules[0][1]);
-  // Sep 11-15, 2026: worst scheduler delay 284 min, full scan 307 min.
-  const estimatedFinish = startMinutes + 284 + 307 + 30 + 60;
-  assert.ok(startMinutes >= 12 * 60, "Prepare the morning report the previous evening");
-  assert.ok(estimatedFinish <= (24 + 7) * 60,
-    "Leave a 30-minute margin before 07:00 after observed delays and the spring DST lost hour");
+  assert.equal(`${schedules[0][2]}:${schedules[0][1]}`, "16:30");
+  assert.match(workflow, /--scheduled-at "\$run_created_at"/);
+  assert.match(workflow, /--run-created-at "\$run_created_at"/);
 });
 
 runTest("evening and delayed overnight runs retain the same 60 pickup dates", () => {

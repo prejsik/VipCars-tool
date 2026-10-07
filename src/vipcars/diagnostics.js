@@ -26,6 +26,24 @@ function createAttemptDiagnostics(metadata) {
   const stages = [];
   let resultState = null;
   const listeners = [];
+  const elapsedFor = (names) => stages.reduce((total, stage) =>
+    total + (names.includes(stage.name) ? stage.elapsed_ms : 0), 0);
+  const startStage = (name, { aggregate = false, exclude = [] } = {}) => {
+    const start = Date.now();
+    const excluded = elapsedFor(exclude);
+    let finished = false;
+    return (status = "success") => {
+      if (finished) return;
+      finished = true;
+      const elapsed_ms = Math.max(0, Date.now() - start - (elapsedFor(exclude) - excluded));
+      const stage = aggregate && stages.find((record) => record.name === name);
+      if (stage) {
+        stage.elapsed_ms += elapsed_ms;
+        stage.count += 1;
+        if (status === "failure") stage.status = status;
+      } else stages.push({ name, elapsed_ms, status, ...(aggregate ? { count: 1 } : {}) });
+    };
+  };
   const append = (records, record) => {
     if (records.length >= 50) records.shift();
     records.push({ elapsed_ms: Date.now() - started, ...record });
@@ -53,7 +71,7 @@ function createAttemptDiagnostics(metadata) {
   return {
     recordResultState(state) {
       resultState = Object.fromEntries([
-        "cardCount", "automaticCardCount", "totalCount", "counterId",
+        "cardCount", "pageCount", "automaticCardCount", "totalCount", "counterId",
         "noResults", "hasBusyIndicator", "busy", "filterChecked"
       ].map((key) => [key, state[key]]));
     },
@@ -82,12 +100,13 @@ function createAttemptDiagnostics(metadata) {
       }
     },
     detach() { listeners.forEach((remove) => remove()); },
-    async measure(name, action) {
-      const start = Date.now();
+    start: startStage,
+    async measure(name, action, options) {
+      const finish = startStage(name, options);
       let status = "success";
       try { return await action(); }
       catch (error) { status = "failure"; throw error; }
-      finally { stages.push({ name, elapsed_ms: Date.now() - start, status }); }
+      finally { finish(status); }
     },
     snapshot(error) {
       return {

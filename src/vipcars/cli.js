@@ -42,12 +42,27 @@ async function main(argv = process.argv.slice(2)) {
     const persistRunState = () => saveRunState(config.resumeStatePath, runState);
     const attemptCounts = new DurableAttemptMap(runState.attemptCounts, persistRunState);
     runState.attemptCounts = attemptCounts;
-    const deadlineAt = Date.parse(runState.startedAt) + config.jobBudgetMs;
+    class ResumableScraper extends VipCarsScraper {
+      async runLocationWithRetries(browser, location, options) {
+        const outcome = await super.runLocationWithRetries(browser, location, options);
+        const key = checkKey(this.config.pickupDate, this.config.currentDurationDays, location);
+        if (outcome.ok) {
+          runState.retryability.delete(key);
+        } else {
+          // A spent job budget or server cooldown defers work, unlike a permanent error.
+          const deferred = outcome.error?.retryable !== false && (deadlineReached(options.deadlineAt)
+            || ["JOB_DEADLINE", "SERVER_COOLDOWN"].includes(outcome.error?.code));
+          runState.retryability.set(key, outcome.retryable === true || outcome.error?.retryable === true || deferred);
+        }
+        return outcome;
+      }
+    }
+    const deadlineAt = Math.min(Date.parse(runState.budgetStartedAt) + config.jobBudgetMs, runState.expiresAt);
     saveCheckpoint(config, allResults, coverageRows, runState);
 
     let browser;
     try {
-      if (!deadlineReached(deadlineAt) && hasRunnableChecks(coverageRows, attemptCounts)) {
+      if (!deadlineReached(deadlineAt) && hasRunnableChecks(coverageRows, attemptCounts, runState.retryability)) {
         browser = await chromium.launch({ headless: config.headless });
         firstPass:
         for (const pickupDate of config.pickupDateOptions) {
@@ -55,7 +70,7 @@ async function main(argv = process.argv.slice(2)) {
             if (deadlineReached(deadlineAt)) {
               break firstPass;
             }
-            const locations = runnableLocations(coverageRows, pickupDate, durationDays, attemptCounts);
+            const locations = runnableLocations(coverageRows, pickupDate, durationDays, attemptCounts, runState.retryability);
             if (!locations.length) {
               continue;
             }
@@ -67,7 +82,7 @@ async function main(argv = process.argv.slice(2)) {
               currentDurationDays: durationDays
             };
             console.log(`Scenario: ${scenarioConfig.pickupDate} -> ${scenarioConfig.dropoffDate} (${durationDays} days)`);
-            const scraper = new VipCarsScraper(scenarioConfig);
+            const scraper = new ResumableScraper(scenarioConfig);
             const { results, failures, checks } = await scraper.run((results, checks) => {
               appendUniqueResults(allResults, resultKeys, results);
               applyScenarioChecks(coverageRows, pickupDate, durationDays, checks);
@@ -112,7 +127,7 @@ async function main(argv = process.argv.slice(2)) {
               currentDurationDays: durationDays
             };
             console.log(`Recovery: ${pickupDate}, ${durationDays} days, ${location}`);
-            const scraper = new VipCarsScraper(scenarioConfig);
+            const scraper = new ResumableScraper(scenarioConfig);
             const { results, failures, checks } = await scraper.run((recoveryResults, recoveryChecks) => {
               appendUniqueResults(allResults, resultKeys, recoveryResults);
               applyScenarioChecks(coverageRows, pickupDate, durationDays, recoveryChecks);
@@ -229,15 +244,17 @@ function saveCheckpoint(config, results, coverageRows, runState) {
   writeTextFile(config.outputCoverage, toCoverageCsv(coverageRows));
 }
 
-function hasRunnableChecks(coverageRows, attemptCounts) {
+function hasRunnableChecks(coverageRows, attemptCounts, retryability) {
   return coverageRows.some((row) => row.status !== "complete"
+    && retryability.get(checkKey(row.pickup_date, row.duration_days, row.location)) !== false
     && (attemptCounts.get(checkKey(row.pickup_date, row.duration_days, row.location)) || 0) < MAX_ATTEMPTS_PER_CHECK);
 }
 
-function runnableLocations(coverageRows, pickupDate, durationDays, attemptCounts) {
+function runnableLocations(coverageRows, pickupDate, durationDays, attemptCounts, retryability) {
   return coverageRows.filter((row) => row.pickup_date === pickupDate
     && Number(row.duration_days) === Number(durationDays)
     && row.status !== "complete"
+    && retryability.get(checkKey(pickupDate, durationDays, row.location)) !== false
     && (attemptCounts.get(checkKey(pickupDate, durationDays, row.location)) || 0) < MAX_ATTEMPTS_PER_CHECK
   ).map((row) => row.location);
 }

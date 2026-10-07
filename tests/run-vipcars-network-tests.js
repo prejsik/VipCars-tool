@@ -1,6 +1,8 @@
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const { loadConfig } = require("../src/vipcars/config");
+const { createAttemptDiagnostics } = require("../src/vipcars/diagnostics");
+const { VipCarsScraper } = require("../src/vipcars/scraper");
 const { parseResultRequest, validateResultRequest, collectResultPages, compareVisibleCards, requestUrl, fetchResultPage, allowPaginationRequest, captureInitialResults, preparePaginationSource } = require("../src/vipcars/resultTransport");
 
 const expected = new URL("https://www.vipcars.com/search/?pickup_country=119&pickup_city=1744&pickup_location=10921&dropoff_country=119&dropoff_city=1744&dropoff_location=10921&pickup_date=2026-09-28&dropoff_date=2026-09-30&pickup_time=10%3A00&dropoff_time=10%3A00&currency=EUR&driver_age=30");
@@ -41,6 +43,62 @@ function mockResponse(requestUrl, html, headers = {}, status = 200) {
 }
 
 async function main() {
+  const realNow = Date.now;
+  let now = 1000;
+  try {
+    Date.now = () => now;
+    const diagnostics = createAttemptDiagnostics({ location: "Warsaw" });
+    const aggregate = { aggregate: true };
+    // Gate time must not be counted again as HTTP or lifecycle wait.
+    await diagnostics.measure("network_transport_wait", () => diagnostics.measure("network_http_fetch", async () => {
+      const dispatched = diagnostics.start("network_throttle_wait", aggregate);
+      now += 3000;
+      dispatched();
+      dispatched();
+      now += 120;
+    }, { ...aggregate, exclude: ["network_throttle_wait"] }).then(() => { now += 40; }),
+    { ...aggregate, exclude: ["network_http_fetch", "network_throttle_wait"] });
+    for (let index = 0; index < 100; index += 1) {
+      await diagnostics.measure("network_parser", async () => { now += 2; }, aggregate);
+    }
+    const error = new Error("fixture parser failure");
+    await assert.rejects(diagnostics.measure("network_parser", async () => {
+      now += 7;
+      throw error;
+    }, aggregate), (actual) => actual === error);
+    const stages = diagnostics.snapshot().stages;
+    assert.equal(stages.length, 4, "aggregate storage must not grow with page count");
+    assert.deepEqual(Object.fromEntries(stages.map((stage) => [stage.name, stage.elapsed_ms])), {
+      network_throttle_wait: 3000, network_http_fetch: 120, network_transport_wait: 40, network_parser: 207
+    });
+    assert.equal(stages.find((stage) => stage.name === "network_parser").status, "failure");
+    assert.equal(stages.find((stage) => stage.name === "network_parser").count, 101);
+    assert.equal(stages.find((stage) => stage.name === "network_throttle_wait").count, 1);
+  } finally { Date.now = realNow; }
+  console.log("PASS bounded aggregate timings separate throttle, HTTP, parser and lifecycle waits");
+  const realTimeout = global.setTimeout;
+  try {
+    now = 1000;
+    Date.now = () => now;
+    global.setTimeout = (callback, milliseconds) => {
+      now += milliseconds;
+      queueMicrotask(callback);
+    };
+    const scraper = new VipCarsScraper({});
+    let waited;
+    scraper.runSingleLocation = async (browser, location, options) => {
+      waited = options.cooldownWaitMs;
+      return { ok: true, results: [] };
+    };
+    const outcome = await scraper.runLocationWithRetries({}, "Warsaw", {
+      cooldown: { until: 1050 }, deadlineAt: 2000
+    });
+    assert.equal(outcome.ok, true);
+    assert.equal(waited, 50, "only elapsed pre-attempt cooldown wait belongs in the separate cooldown metric");
+  } finally {
+    Date.now = realNow;
+    global.setTimeout = realTimeout;
+  }
   const opaqueParams = new URLSearchParams(params);
   opaqueParams.set("key", "private&nested=one%2Btwo+three/four=");
   const opaqueUrl = new URL(`https://be.supplycars.com/be1/node.php?${JSON.stringify(`&${opaqueParams}`)}`).href;
@@ -205,6 +263,23 @@ async function main() {
   });
   assert.equal((await collect()).length, 3);
   assert.equal(calls, 1);
+  const states = [];
+  const diagnosticState = createAttemptDiagnostics({ location: "Warsaw" });
+  const paged = await collectResultPages({ initial, source, deadlineAt: Date.now() + 1000,
+    onState: (state) => { states.push(state); diagnosticState.recordResultState(state); },
+    fetchPage: async () => next });
+  assert.deepEqual(paged.map((offer) => offer.cardId), ["1", "2", "3"]);
+  assert.deepEqual(states.map((state) => state.pageCount), [1, 2]);
+  assert.equal(diagnosticState.snapshot().result_state.pageCount, 2);
+  states.length = 0;
+  await assert.rejects(collectResultPages({ initial, source, deadlineAt: Date.now() + 1000,
+    onState: (state) => states.push(state), fetchPage: async () => ({ ...next, cards: [card(1)] }) }), /duplicate/i);
+  assert.deepEqual(states.map((state) => state.pageCount), [1], "invalid pages must not count as collected");
+  states.length = 0;
+  await assert.rejects(collectResultPages({ initial: { ...initial, nextOffset: 3 }, source,
+    deadlineAt: Date.now() + 1000, onState: (state) => states.push(state),
+    fetchPage: async () => { throw new Error("must not fetch a skipped page"); } }), /skips/i);
+  assert.deepEqual(states, [], "a page with a skipped cursor is not a validated page");
   await assert.rejects(collect({ ...next, totalCount: 4 }), /count/i);
   await assert.rejects(collect({ ...next, cards: [card(1)] }), /duplicate/i);
   await assert.rejects(collect({ ...next, cards: [] }), /empty/i);

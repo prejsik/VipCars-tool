@@ -91,12 +91,13 @@ function matrixCoverage() {
   const allDurations = "2,3,4,5,6,7,8,9,10,11,12,13,14";
   const matrix = scrapeMatrix(["--config", config, "--pickup-dates", dates.join(","),
     "--locations", locations, "--durations-days", allDurations]);
-  assert.equal(matrix.include.length, 135);
+  assert.equal(matrix.include.length, 225);
   const checks = new Set();
   for (const shard of matrix.include) {
     assert.ok(dates.includes(shard.pickup_dates));
     const durations = shard.durations.split(",").map(Number);
-    assert.ok(durations.length * 7 <= 42);
+    assert.ok(durations.length * 7 <= 21);
+    assert.equal(new Set(durations.map((duration) => duration <= 6 ? 0 : duration <= 8 ? 1 : 2)).size, 1);
     assert.ok(durations.length * 7 * 240000 < 170 * 60000,
       "every shard must fit a first pass even at the attempt limit");
     for (const duration of durations) {
