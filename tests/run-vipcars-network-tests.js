@@ -47,6 +47,53 @@ async function main() {
   let now = 1000;
   try {
     Date.now = () => now;
+    for (const outerFirst of [true, false]) {
+      now = 1000;
+      const diagnostics = createAttemptDiagnostics({ location: "Warsaw" });
+      const transportDone = diagnostics.start("network_transport_wait", {
+        aggregate: true, exclude: ["network_http_fetch", "network_throttle_wait"] });
+      const httpDone = diagnostics.start("network_http_fetch", { aggregate: true, exclude: ["network_throttle_wait"] });
+      const throttleDone = diagnostics.start("network_throttle_wait", { aggregate: true });
+      now += 30;
+      const active = diagnostics.snapshot();
+      assert.deepEqual(Object.fromEntries(active.stages.map((stage) => [stage.name, stage.elapsed_ms])), {
+        network_transport_wait: 0, network_http_fetch: 0, network_throttle_wait: 30
+      }, "snapshots must account active nested exclusions without double counting");
+      throttleDone();
+      now += 70;
+      const finish = outerFirst ? [transportDone, httpDone] : [httpDone, transportDone];
+      finish.forEach((done) => done("failure"));
+      finish.forEach((done) => done("failure"));
+      const stages = diagnostics.snapshot().stages;
+      assert.deepEqual(Object.fromEntries(stages.map((stage) => [stage.name, stage.elapsed_ms])), {
+        network_throttle_wait: 30, network_transport_wait: 0, network_http_fetch: 70
+      }, "exclusive elapsed time must not depend on finish order");
+      assert.ok(stages.every((stage) => stage.count === 1));
+      assert.equal(active.stages.find((stage) => stage.name === "network_throttle_wait").elapsed_ms, 30,
+        "a snapshot must not mutate when active intervals finish");
+    }
+    now = 1000;
+    const diagnostics = createAttemptDiagnostics({ location: "Warsaw" });
+    let rejectDeadline;
+    const deadline = new Promise((resolve, reject) => { rejectDeadline = reject; });
+    const bounded = (operation) => Promise.race([operation, deadline]);
+    const measure = (name, action, extra = {}) => diagnostics.measure(name,
+      () => bounded(Promise.resolve().then(action)), { aggregate: true, ...extra });
+    const pending = measure("network_transport_wait", () =>
+      measure("network_http_fetch", () => new Promise(() => {}), { exclude: ["network_throttle_wait"] }),
+      { exclude: ["network_http_fetch", "network_throttle_wait"] });
+    await new Promise((resolve) => setImmediate(resolve));
+    now += 100;
+    rejectDeadline(Object.assign(new Error("fixture deadline"), { code: "ATTEMPT_TIMEOUT" }));
+    await assert.rejects(pending, { code: "ATTEMPT_TIMEOUT" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(Object.fromEntries(diagnostics.snapshot().stages.map((stage) => [stage.name, stage.elapsed_ms])), {
+      network_transport_wait: 0, network_http_fetch: 100
+    }, "the scraper's shared deadline must not charge the unfinished HTTP interval to transport wait");
+  } finally { Date.now = realNow; }
+  console.log("PASS active snapshots and shared-deadline timings remain exclusive in either finish order");
+  try {
+    Date.now = () => now;
     const diagnostics = createAttemptDiagnostics({ location: "Warsaw" });
     const aggregate = { aggregate: true };
     // Gate time must not be counted again as HTTP or lifecycle wait.

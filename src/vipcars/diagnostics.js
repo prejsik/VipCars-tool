@@ -24,24 +24,33 @@ function createAttemptDiagnostics(metadata) {
   const requests = [];
   const errors = [];
   const stages = [];
+  const activeStages = new Set();
   let resultState = null;
   const listeners = [];
-  const elapsedFor = (names) => stages.reduce((total, stage) =>
-    total + (names.includes(stage.name) ? stage.elapsed_ms : 0), 0);
+  const elapsedFor = (names, now) => stages.reduce((total, stage) =>
+    total + (names.includes(stage.name) ? stage.elapsed_ms : 0), 0)
+    + [...activeStages].reduce((total, stage) =>
+      total + (names.includes(stage.name) ? elapsedStage(stage, now) : 0), 0);
+  const elapsedStage = (stage, now) => Math.max(0,
+    now - stage.start - (elapsedFor(stage.exclude, now) - stage.excluded));
+  const recordStage = (records, interval, elapsed_ms, status) => {
+    const { name, aggregate } = interval;
+    const stage = aggregate && records.find((record) => record.name === name);
+    if (stage) {
+      stage.elapsed_ms += elapsed_ms;
+      stage.count += 1;
+      if (status === "failure" || (status === "running" && stage.status !== "failure")) stage.status = status;
+    } else records.push({ name, elapsed_ms, status, ...(aggregate ? { count: 1 } : {}) });
+  };
   const startStage = (name, { aggregate = false, exclude = [] } = {}) => {
     const start = Date.now();
-    const excluded = elapsedFor(exclude);
-    let finished = false;
+    const interval = { name, aggregate, exclude, start, excluded: elapsedFor(exclude, start) };
+    activeStages.add(interval);
     return (status = "success") => {
-      if (finished) return;
-      finished = true;
-      const elapsed_ms = Math.max(0, Date.now() - start - (elapsedFor(exclude) - excluded));
-      const stage = aggregate && stages.find((record) => record.name === name);
-      if (stage) {
-        stage.elapsed_ms += elapsed_ms;
-        stage.count += 1;
-        if (status === "failure") stage.status = status;
-      } else stages.push({ name, elapsed_ms, status, ...(aggregate ? { count: 1 } : {}) });
+      if (!activeStages.has(interval)) return;
+      const elapsed_ms = elapsedStage(interval, Date.now());
+      activeStages.delete(interval);
+      recordStage(stages, interval, elapsed_ms, status);
     };
   };
   const append = (records, record) => {
@@ -109,9 +118,14 @@ function createAttemptDiagnostics(metadata) {
       finally { finish(status); }
     },
     snapshot(error) {
+      const now = Date.now();
+      const currentStages = stages.map((stage) => ({ ...stage }));
+      for (const interval of activeStages) {
+        recordStage(currentStages, interval, elapsedStage(interval, now), error ? "failure" : "running");
+      }
       return {
-        ...metadata, started_at: new Date(started).toISOString(), elapsed_ms: Date.now() - started,
-        outcome: error ? "failure" : "success", stages, requests, errors, result_state: resultState,
+        ...metadata, started_at: new Date(started).toISOString(), elapsed_ms: now - started,
+        outcome: error ? "failure" : "success", stages: currentStages, requests, errors, result_state: resultState,
         failure: error ? { code: error.code || error.name, message: sanitizeMessage(error.message) } : null
       };
     }

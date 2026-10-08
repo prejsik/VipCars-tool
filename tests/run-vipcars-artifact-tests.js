@@ -1,8 +1,12 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 const program = path.resolve("src/vipcars/runArtifacts.js");
+const workflow = fs.readFileSync(path.resolve(".github/workflows/vipcars-daily.yml"), "utf8").replace(/\r\n/g, "\n");
+assert.ok(workflow.includes("concurrency:\n  group: ${{ github.event_name == 'push' && 'vipcars-push-smoke' || 'vipcars-collection' }}\n  cancel-in-progress: false\n"),
+  "A push smoke test must not replace the pending full report, or cancel an active collection");
 const artifacts = [
   { id: 101, name: "vipcars-results-chunk-1-72-attempt-1", expired: false },
   { id: 102, name: "vipcars-results-chunk-2-72-attempt-1", expired: false },

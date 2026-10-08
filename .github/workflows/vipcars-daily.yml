@@ -50,6 +50,11 @@ on:
         required: true
         default: "automatic"
 
+# Serialize full runs; a push smoke test must not displace a pending daily report.
+concurrency:
+  group: ${{ github.event_name == 'push' && 'vipcars-push-smoke' || 'vipcars-collection' }}
+  cancel-in-progress: false
+
 permissions:
   actions: read
   contents: read

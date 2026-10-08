@@ -8,6 +8,11 @@ function requestEvent(requestId, url = RESULT_URL, method = "GET") {
   return { requestId, request: { url, method } };
 }
 
+function preflightEvent(requestId, parentId) {
+  return { ...requestEvent(requestId, RESULT_URL, "OPTIONS"),
+    initiator: { type: "preflight", requestId: parentId } };
+}
+
 function responseEvent(requestId, status, hasExtraInfo, headers = {}) {
   return { requestId, response: { status, headers }, hasExtraInfo };
 }
@@ -56,6 +61,135 @@ async function assertPending(promise, message) {
 }
 
 async function main() {
+  for (const kind of ["GET", "preflight"]) {
+    const { page, cdp } = cdpHarness();
+    const failures = [];
+    const observer = observeResultFailures(page, (error) => failures.push(error));
+    await observer.ready;
+    const correlated = observer.correlate(RESULT_URL, async () => { throw new Error("aborted"); });
+    let rejected;
+    correlated.catch((error) => { rejected = error; });
+    cdp.emit("Network.requestWillBeSent", requestEvent("canceled-get"));
+    if (kind === "preflight") cdp.emit("Network.requestWillBeSent", preflightEvent("canceled-options", "canceled-get"));
+    else cdp.emit("Network.responseReceived", responseEvent("canceled-get", 400, true));
+    cdp.emit("Network.loadingFailed", loadingFailedEvent("canceled-get", { canceled: true }));
+    await assertPending(correlated, "cancellation must not race the associated response metadata");
+    if (kind === "preflight") {
+      cdp.emit("Network.responseReceived", responseEvent("canceled-options", 400, true));
+      await assertPending(correlated, "declared preflight headers must still be awaited after GET cancellation");
+    }
+    cdp.emit("Network.responseReceivedExtraInfo", extraInfoEvent(
+      kind === "GET" ? "canceled-get" : "canceled-options", 400, { "Retry-After": "60" }));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(rejected?.code, "SERVER_COOLDOWN", "cancellation must preserve the finalized wire cooldown");
+    assert.equal(failures.length, 1);
+    await observer.detach();
+  }
+
+  for (const order of ["get-first", "preflight-first", "extra-first"]) {
+    const { page, cdp } = cdpHarness();
+    const failures = [];
+    const observer = observeResultFailures(page, (error) => failures.push(error));
+    await observer.ready;
+    const correlated = observer.correlate(RESULT_URL, async () => { throw new Error("Failed to fetch"); });
+    let rejected;
+    correlated.catch((error) => { rejected = error; });
+    if (order === "extra-first") {
+      cdp.emit("Network.responseReceivedExtraInfo", extraInfoEvent("linked-options", 400, { "Retry-After": "3600" }));
+    }
+    if (order === "get-first") cdp.emit("Network.requestWillBeSent", requestEvent("linked-get"));
+    cdp.emit("Network.requestWillBeSent", preflightEvent("linked-options", "linked-get"));
+    cdp.emit("Network.responseReceived", responseEvent("linked-options", 400, true));
+    cdp.emit("Network.loadingFinished", { requestId: "linked-options" });
+    if (order !== "get-first") cdp.emit("Network.requestWillBeSent", requestEvent("linked-get"));
+    cdp.emit("Network.loadingFailed", loadingFailedEvent("linked-get", {
+      corsErrorStatus: { corsError: "PreflightInvalidStatus", failedParameter: "" }
+    }));
+    if (order !== "extra-first") {
+      await new Promise((resolve) => setTimeout(resolve, 160));
+      await assertPending(correlated, "a failed preflight must wait for its declared wire headers");
+      assert.deepEqual(failures, []);
+      cdp.emit("Network.responseReceivedExtraInfo", extraInfoEvent("linked-options", 400, { "Retry-After": "3600" }));
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(rejected?.code, "SERVER_COOLDOWN", "linked preflight headers must settle the failed GET without GET extra-info");
+    assert.ok(rejected.retryAt > Date.now() + 3500000);
+    assert.equal(failures.length, 1);
+    assert.strictEqual(rejected, failures[0]);
+    await observer.detach();
+  }
+
+  for (const status of [200, 400]) {
+    const { page, cdp } = cdpHarness();
+    const failures = [];
+    const observer = observeResultFailures(page, (error) => failures.push(error));
+    await observer.ready;
+    const correlated = observer.correlate(RESULT_URL, async () => { throw new Error("Failed to fetch"); });
+    let rejected;
+    correlated.catch((error) => { rejected = error; });
+    cdp.emit("Network.requestWillBeSent", requestEvent("plain-get"));
+    cdp.emit("Network.requestWillBeSent", preflightEvent("unrelated-options", "other-get"));
+    cdp.emit("Network.responseReceivedExtraInfo", extraInfoEvent("unrelated-options", 400, { "Retry-After": "3600" }));
+    await assertPending(correlated, "same-URL OPTIONS with another initiator must not claim the GET");
+    assert.deepEqual(failures, []);
+    cdp.emit("Network.requestWillBeSent", preflightEvent("plain-options", "plain-get"));
+    cdp.emit("Network.responseReceived", responseEvent("plain-options", status, false,
+      status === 400 ? { "Retry-After": "60" } : {}));
+    cdp.emit("Network.loadingFinished", { requestId: "plain-options" });
+    cdp.emit("Network.loadingFailed", loadingFailedEvent("plain-get", {
+      corsErrorStatus: { corsError: "HeaderDisallowedByPreflightResponse", failedParameter: "content-type" }
+    }));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(rejected?.code, status === 400 ? "SERVER_COOLDOWN" : "RESULT_TRANSPORT_INVALID",
+      "preflight failures with complete headers must not await nonexistent GET headers");
+    assert.equal(failures.length, 1);
+    await observer.detach();
+  }
+
+  {
+    const { page, cdp } = cdpHarness();
+    const failures = [];
+    const observer = observeResultFailures(page, (error) => failures.push(error));
+    await observer.ready;
+    const correlated = observer.correlate(RESULT_URL, async () => "must not succeed");
+    correlated.catch(() => {});
+    cdp.emit("Network.requestWillBeSent", requestEvent("missing-get"));
+    cdp.emit("Network.requestWillBeSent", preflightEvent("missing-options", "missing-get"));
+    cdp.emit("Network.responseReceived", responseEvent("missing-options", 400, true));
+    cdp.emit("Network.loadingFinished", { requestId: "missing-options" });
+    cdp.emit("Network.responseReceived", responseEvent("missing-get", 200, false));
+    cdp.emit("Network.loadingFinished", { requestId: "missing-get" });
+    await assertPending(correlated, "missing declared preflight headers must fail closed, not accept GET success");
+    await observer.detach();
+    await assert.rejects(correlated, { code: "RESULT_TRANSPORT_INVALID" });
+    assert.deepEqual(failures, []);
+    assert.equal(cdp.listenerCount("Network.responseReceivedExtraInfo"), 0);
+  }
+
+  {
+    const { page, cdp } = cdpHarness();
+    const failures = [];
+    const observer = observeResultFailures(page, (error) => failures.push(error));
+    await observer.ready;
+    const correlated = observer.correlate(RESULT_URL, async () => { throw new Error("aborted"); });
+    let rejected;
+    correlated.catch((error) => { rejected = error; });
+    cdp.emit("Network.requestWillBeSent", requestEvent("abort-linked-get"));
+    cdp.emit("Network.requestWillBeSent", preflightEvent("abort-linked-options", "abort-linked-get"));
+    cdp.emit("Network.responseReceived", responseEvent("abort-linked-options", 400, true));
+    cdp.emit("Network.loadingFailed", loadingFailedEvent("abort-linked-get", { canceled: true }));
+    await assertPending(correlated, "cancellation must not discard a declared preflight Retry-After");
+    for (let index = 0; index < 300; index += 1) {
+      cdp.emit("Network.responseReceived", responseEvent(`preflight-noise-${index}`, 200, false));
+    }
+    cdp.emit("Network.responseReceivedExtraInfo", extraInfoEvent("abort-linked-options", 400, { "Retry-After": "60" }));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(rejected?.code, "SERVER_COOLDOWN", "active associated preflight metadata must survive bounded unrelated traffic");
+    assert.equal(failures.length, 1);
+    await observer.detach();
+  }
+  console.log("PASS initiator-linked preflight cooldown, terminal CORS failures and fail-closed cleanup");
+
   for (const status of [200, 400]) {
     const { page, cdp } = cdpHarness();
     const failures = [];

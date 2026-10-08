@@ -115,7 +115,9 @@ function observeResultFailures(page, onFailure) {
     let state = requests.get(requestId);
     if (!state) {
       if (requests.size >= 256) {
-        const evictable = [...requests].find(([, candidate]) => !candidate.ticket || candidate.ticket.settled);
+        const evictable = [...requests].find(([, candidate]) =>
+          (!candidate.ticket || candidate.ticket.settled)
+          && (!candidate.parent?.ticket || candidate.parent.ticket.settled));
         if (!evictable) return {};
         requests.delete(evictable[0]);
       }
@@ -124,10 +126,14 @@ function observeResultFailures(page, onFailure) {
     }
     return state;
   };
+  const removeRequest = (requestId, state) => {
+    requests.delete(requestId);
+    if (state.preflightId) requests.delete(state.preflightId);
+  };
   const finish = (requestId, state, error) => {
     if (state.reported) return;
     state.reported = true;
-    if (state.terminal) requests.delete(requestId);
+    if (state.terminal) removeRequest(requestId, state);
     if (!detached) {
       try {
         onFailure(error);
@@ -137,12 +143,35 @@ function observeResultFailures(page, onFailure) {
     }
   };
   const advance = (requestId, state) => {
+    if (state.parent) {
+      advance(state.preflightFor, state.parent);
+      return;
+    }
     if (state.isResult === false) {
-      requests.delete(requestId);
+      removeRequest(requestId, state);
+      return;
+    }
+    if (state.isResult !== true) return;
+    if (state.reported) {
+      if (state.terminal) removeRequest(requestId, state);
+      return;
+    }
+    const preflight = state.preflight;
+    // A terminal GET (including cancellation) must not race its preflight's wire headers.
+    if (preflight && !preflight.extraSeen && (preflight.responseHasExtraInfo
+        || (!preflight.responseSeen && !preflight.physicalFailure && !preflight.aborted))) return;
+    const preflightError = preflight?.extraError || preflight?.responseError;
+    if (preflightError) {
+      finish(requestId, state, preflightError);
+      return;
+    }
+    if (state.responseHasExtraInfo && !state.extraSeen) return;
+    if (state.extraError) {
+      finish(requestId, state, state.extraError);
       return;
     }
     if (state.aborted) {
-      requests.delete(requestId);
+      removeRequest(requestId, state);
       if (state.ticket) {
         const error = state.ticket.operationDone && state.ticket.operationError
           ? state.ticket.operationError : canceledRequestFailure();
@@ -150,21 +179,16 @@ function observeResultFailures(page, onFailure) {
       }
       return;
     }
-    if (state.isResult !== true) return;
-    if (state.reported) {
-      if (state.terminal) requests.delete(requestId);
-      return;
-    }
-    if (state.extraError) {
-      finish(requestId, state, state.extraError);
-      return;
-    }
     if (state.physicalFailure) {
       finish(requestId, state, state.physicalFailure);
       return;
     }
     if (state.corsFailure) {
-      if (state.extraSeen) finish(requestId, state, networkFailure());
+      const headersSeen = state.preflightFailure
+        ? preflight && (preflight.extraSeen || (preflight.responseSeen && !preflight.responseHasExtraInfo)
+          || preflight.physicalFailure || preflight.aborted)
+        : state.extraSeen;
+      if (headersSeen) finish(requestId, state, networkFailure());
       return;
     }
     if (state.responseError) {
@@ -175,12 +199,22 @@ function observeResultFailures(page, onFailure) {
     }
     if (state.terminal && state.responseSeen && (!state.responseHasExtraInfo || state.extraSeen)) {
       completeTicket(state.ticket);
-      requests.delete(requestId);
+      removeRequest(requestId, state);
     }
   };
 
-  const requestWillBeSent = ({ requestId, request }) => {
+  const requestWillBeSent = ({ requestId, request, initiator }) => {
     const state = stateFor(requestId);
+    if (request.method === "OPTIONS" && initiator?.type === "preflight" && initiator.requestId
+        && initiator.requestId !== requestId
+        && parseResultRequest(request.url, { includeFiltered: true, includeBootstrap: true })) {
+      state.preflightFor = initiator.requestId;
+      state.parent = stateFor(initiator.requestId);
+      state.parent.preflight = state;
+      state.parent.preflightId = requestId;
+      advance(requestId, state);
+      return;
+    }
     state.isResult = request.method === "GET"
       && Boolean(parseResultRequest(request.url, { includeFiltered: true, includeBootstrap: true }));
     if (state.isResult) {
@@ -218,7 +252,10 @@ function observeResultFailures(page, onFailure) {
     const state = stateFor(requestId);
     state.terminal = true;
     if (canceled === true || errorText === "net::ERR_ABORTED") state.aborted = true;
-    else if (corsErrorStatus) state.corsFailure = true;
+    else if (corsErrorStatus) {
+      state.corsFailure = true;
+      state.preflightFailure = /preflight/i.test(corsErrorStatus.corsError);
+    }
     else state.physicalFailure = networkFailure();
     advance(requestId, state);
   };
