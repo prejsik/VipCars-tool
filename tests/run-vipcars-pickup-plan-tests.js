@@ -22,35 +22,37 @@ function runPlanner(args, timezone = "UTC", now) {
   });
 }
 
-test("45 dates and seven locations preserve 4095 unique checks in 225 bounded price-band shards", () => {
-  const dates = Array.from({ length: 45 }, (_, index) =>
-    new Date(Date.UTC(2026, 8, 16 + index)).toISOString().slice(0, 10));
-  const locations = ["Bydgoszcz", "Warsaw", "Krakow", "Gdansk", "Katowice", "Wroclaw", "Poznan"];
-  const matrix = scrapeMatrix([...configArgs, "--pickup-dates", dates.join(","),
-    "--locations", locations.join(","), "--durations-days", "2,3,4,5,6,7,8,9,10,11,12,13,14"]);
-  assert.equal(matrix.include.length, 225);
-  assert.deepEqual(matrix.include.slice(0, 5), [
-    { chunk: 1, pickup_dates: "2026-09-16", durations: "2,3,4" },
-    { chunk: 2, pickup_dates: "2026-09-16", durations: "5,6" },
-    { chunk: 3, pickup_dates: "2026-09-16", durations: "7,8" },
-    { chunk: 4, pickup_dates: "2026-09-16", durations: "9,10,11" },
-    { chunk: 5, pickup_dates: "2026-09-16", durations: "12,13,14" }
-  ]);
-  const checks = new Set();
-  for (const shard of matrix.include) {
-    assert.ok(dates.includes(shard.pickup_dates));
-    const durations = shard.durations.split(",").map(Number);
-    assert.ok(durations.length * locations.length <= 21);
-    assert.ok(durations.every((duration) => duration >= 2 && duration <= 14));
-    assert.equal(new Set(durations.map((duration) => duration <= 6 ? 0 : duration <= 8 ? 1 : 2)).size, 1);
-    for (const duration of durations) for (const location of locations) {
-      const key = [shard.pickup_dates, duration, location].join("|");
-      assert.equal(checks.has(key), false, `Duplicate check: ${key}`);
-      checks.add(key);
+for (const rollingDays of [30, 45]) {
+  test(`${rollingDays} dates and seven locations preserve ${rollingDays * 91} unique checks in ${rollingDays * 5} bounded price-band shards`, () => {
+    const dates = Array.from({ length: rollingDays }, (_, index) =>
+      new Date(Date.UTC(2026, 8, 16 + index)).toISOString().slice(0, 10));
+    const locations = ["Bydgoszcz", "Warsaw", "Krakow", "Gdansk", "Katowice", "Wroclaw", "Poznan"];
+    const matrix = scrapeMatrix([...configArgs, "--pickup-dates", dates.join(","),
+      "--locations", locations.join(","), "--durations-days", "2,3,4,5,6,7,8,9,10,11,12,13,14"]);
+    assert.equal(matrix.include.length, rollingDays * 5);
+    assert.deepEqual(matrix.include.slice(0, 5), [
+      { chunk: 1, pickup_dates: "2026-09-16", durations: "2,3,4" },
+      { chunk: 2, pickup_dates: "2026-09-16", durations: "5,6" },
+      { chunk: 3, pickup_dates: "2026-09-16", durations: "7,8" },
+      { chunk: 4, pickup_dates: "2026-09-16", durations: "9,10,11" },
+      { chunk: 5, pickup_dates: "2026-09-16", durations: "12,13,14" }
+    ]);
+    const checks = new Set();
+    for (const shard of matrix.include) {
+      assert.ok(dates.includes(shard.pickup_dates));
+      const durations = shard.durations.split(",").map(Number);
+      assert.ok(durations.length * locations.length <= 21);
+      assert.ok(durations.every((duration) => duration >= 2 && duration <= 14));
+      assert.equal(new Set(durations.map((duration) => duration <= 6 ? 0 : duration <= 8 ? 1 : 2)).size, 1);
+      for (const duration of durations) for (const location of locations) {
+        const key = [shard.pickup_dates, duration, location].join("|");
+        assert.equal(checks.has(key), false, `Duplicate check: ${key}`);
+        checks.add(key);
+      }
     }
-  }
-  assert.equal(checks.size, 4095);
-});
+    assert.equal(checks.size, rollingDays * 91);
+  });
+}
 
 test("the 256-job matrix boundary remains enforced", () => {
   assert.equal(scrapeMatrix([...configArgs, "--pickup-rolling-days", "51"]).include.length, 255);

@@ -5,6 +5,10 @@ const { spawnSync } = require("node:child_process");
 
 const program = path.resolve("src/vipcars/runArtifacts.js");
 const workflow = fs.readFileSync(path.resolve(".github/workflows/vipcars-daily.yml"), "utf8").replace(/\r\n/g, "\n");
+assert.ok(workflow.includes('\n  SCHEDULE_PICKUP_ROLLING_DAYS: "30"\n'),
+  "The daily scan must use 30 rolling pickup dates");
+assert.ok(workflow.includes('      pickup_rolling_days:\n        description: "Number of consecutive pickup dates from today"\n        required: false\n        default: "30"\n'),
+  "The manual rolling default must match the 30-day scheduled range");
 assert.ok(workflow.includes("concurrency:\n  group: ${{ github.event_name == 'push' && 'vipcars-push-smoke' || 'vipcars-collection' }}\n  cancel-in-progress: false\n"),
   "A push smoke test must not replace the pending full report, or cancel an active collection");
 const artifacts = [
