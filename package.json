@@ -10,7 +10,8 @@
     "vipcars:rates": "python tools/update_vipcars_rates.py --workbook input/vipcars-rate-group-export.xlsx --recommendations output/vipcars-pricing-recommendations.json --config vipcars-rate-update.config.json --report-output output/vipcars-recommendations.xlsx --import-output output/vipcars-rates-import-ready.xlsx --summary-output output/vipcars-rate-update-summary.json",
     "test": "node tests/run-vipcars-tests.js && node tests/run-vipcars-report-coverage-tests.js && node tests/run-vipcars-telegram-tests.js && node tests/run-vipcars-pricing-tests.js && node tests/run-vipcars-reliability-tests.js && node tests/run-vipcars-runtime-tests.js && node tests/run-vipcars-cooldown-tests.js && node tests/run-vipcars-throttle-tests.js && node tests/run-vipcars-transport-failure-tests.js && node tests/run-vipcars-readiness-tests.js && node tests/run-vipcars-search-contract-tests.js && node tests/run-vipcars-resume-tests.js && node tests/run-vipcars-network-tests.js && node tests/run-vipcars-offer-cards-tests.js && node tests/run-vipcars-network-runtime-tests.js && node tests/run-vipcars-filtered-network-tests.js && node tests/run-vipcars-slow-network-tests.js",
     "test:excel": "python tests/run-vipcars-rate-updater-tests.py",
-    "test:all": "npm test && npm run test:plan && npm run test:artifacts && npm run test:excel",
+    "test:all": "npm test && npm run test:plan && npm run test:artifacts && npm run test:diagnostic && npm run test:excel",
+    "test:diagnostic": "node --test tests/run-vipcars-diagnostic-tests.js && node tests/run-vipcars-diagnostic-pacing-tests.js",
     "test:plan": "node tests/run-vipcars-pickup-plan-tests.js",
     "test:artifacts": "node tests/run-vipcars-artifact-tests.js"
   },

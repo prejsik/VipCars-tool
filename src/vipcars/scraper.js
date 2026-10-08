@@ -21,6 +21,10 @@ const MAX_TIMEOUT_RETRIES = 2;
 
 class VipCarsScraper {
   constructor(config) {
+    if (config.resultRequestIntervalMs !== undefined
+        && (!Number.isInteger(config.resultRequestIntervalMs) || config.resultRequestIntervalMs < 3000)) {
+      throw new Error("resultRequestIntervalMs must be a finite integer >= 3000.");
+    }
     this.config = config;
     this.attemptCounts = new Map();
     this.cooldown = { until: 0 };
@@ -98,7 +102,8 @@ class VipCarsScraper {
       }
       counts.set(key, attempts + 1);
       outcome = await this.runSingleLocation(browser, location, {
-        attempt: attempts + 1, deadlineAt, cooldown, onCooldown: options.onCooldown, cooldownWaitMs
+        attempt: attempts + 1, deadlineAt, cooldown, onCooldown: options.onCooldown, cooldownWaitMs,
+        onDiagnostics: options.onDiagnostics
       });
       outcome.attempts = attempts + 1;
       outcome.retryable = !outcome.ok && outcome.attempts < maxAttempts
@@ -135,12 +140,13 @@ class VipCarsScraper {
     let initialResults;
     let filteredResults;
     let detachResultFailures;
+    let attemptError;
     const allowedResultUrls = new Set();
     let expired = false;
     let rejectDeadline;
     const deadline = new Promise((resolve, reject) => { rejectDeadline = reject; });
     const bounded = (operation) => Promise.race([operation, deadline]);
-    const resultRequestGate = createResultRequestGate(cooldown, deadlineAt);
+    const resultRequestGate = createResultRequestGate(cooldown, deadlineAt, this.config.resultRequestIntervalMs);
     const watchdog = setTimeout(() => {
       expired = true;
       rejectDeadline(new Error("Search attempt deadline reached."));
@@ -265,6 +271,7 @@ class VipCarsScraper {
         error.code = "ATTEMPT_TIMEOUT";
       }
       error.message = sanitizeMessage(error.message);
+      attemptError = error;
       await this.captureFailureArtifacts(page, location, diagnostics.snapshot(error)).catch((artifactError) => {
         console.warn(`Could not save failure artifacts: ${sanitizeMessage(artifactError.message)}`);
       });
@@ -276,10 +283,16 @@ class VipCarsScraper {
       filteredResults?.detach();
       diagnostics.detach();
       if (context) await settleWithin(context.close().catch(() => {}), 2000);
-      const timing = diagnostics.snapshot();
+      const timing = diagnostics.snapshot(attemptError);
       console.log(`TIMING ${location} attempt=${attempt} total_ms=${timing.elapsed_ms} `
         + `cooldown_wait_ms=${timing.cooldown_wait_ms} pageCount=${timing.result_state?.pageCount ?? 0} `
         + timing.stages.map((stage) => `${stage.name}=${stage.elapsed_ms}ms/${stage.status}`).join(" "));
+      if (options.onDiagnostics) {
+        try { await options.onDiagnostics(timing); }
+        catch (error) {
+          console.warn(`Could not report VipCars diagnostics: ${sanitizeMessage(error?.message || error)}`);
+        }
+      }
     }
   }
 

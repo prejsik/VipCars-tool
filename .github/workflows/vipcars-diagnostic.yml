@@ -1,0 +1,77 @@
+name: VipCars controlled diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      pickup_date:
+        description: "Future pickup date (YYYY-MM-DD), Warsaw time 10:00"
+        required: true
+        default: "2026-10-09"
+      not_before:
+        description: "Earliest allowed start in UTC, respecting the latest server cooldown"
+        required: true
+        default: "2026-10-08T19:14:00Z"
+      variant_order:
+        description: "Each variant exactly once: serial,slow,parallel,native"
+        required: true
+        default: "serial,slow,parallel,native"
+
+# Do not overlap a full collection. Dispatch only when no full run is pending.
+concurrency:
+  group: vipcars-collection
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      TZ: Europe/Warsaw
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Check diagnostic safeguards offline
+        run: npm run test:diagnostic
+
+      - name: Run bounded diagnostic only
+        shell: bash
+        env:
+          INPUT_PICKUP_DATE: ${{ inputs.pickup_date }}
+          INPUT_NOT_BEFORE: ${{ inputs.not_before }}
+          INPUT_ORDER: ${{ inputs.variant_order }}
+        run: |
+          mkdir -p output/vipcars-diagnostic
+          set -o pipefail
+          node tools/vipcars-diagnostic.js --live \
+            --pickup-date "$INPUT_PICKUP_DATE" \
+            --not-before "$INPUT_NOT_BEFORE" \
+            --order "$INPUT_ORDER" \
+            2>&1 | tee output/vipcars-diagnostic/run.log
+
+      - name: Preserve sanitized diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vipcars-diagnostic-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            output/vipcars-diagnostic/summary.json
+            output/vipcars-diagnostic/launched.json
+            output/vipcars-diagnostic/run.log
+            output/vipcars-diagnostic/failures/**/*.json
+          if-no-files-found: warn
+          retention-days: 7
